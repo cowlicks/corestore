@@ -1,0 +1,10 @@
+[package]
+name = "corestore"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = "0.1.40"
+random-access-storage = "5"
+hypercore = "0.13.0"
+thiserror = "1.0.64"

@@ -8,10 +8,11 @@
     //missing_docs,
     redundant_lifetimes,
     non_local_definitions,
-    unsafe_code,
+    //unsafe_code,
     non_local_definitions
 )]
 
+mod keys;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

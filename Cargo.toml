@@ -11,6 +11,7 @@ random-access-memory = { version = "3.0.0" }
 random-access-disk = { version = "3.0.1", default-features = false, features = ["sparse", "tokio"] }
 tokio = { version = "1.40.0", features = ["macros", "test-util"] }
 data-encoding = "2.6.0"
+libsodium-sys-stable = "1.21.2"
 
 [dependencies.hypercore]
 git = "https://github.com/cowlicks/hypercore.git"
@@ -26,4 +27,6 @@ features = ["sparse", "tokio"]
 
 
 [dev-dependencies]
+rusty_nodejs_repl = "0.2.1"
 tempfile = "3.10.0"
+macros = { path = "../replicator/macros" }

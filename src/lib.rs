@@ -1,32 +1,7 @@
 //!
 //! [`Corestore`] provides a way to manage a related group of [`SharedCore`]s.
-//!
-//! I need to learn some stuff from the js lib
-//! - how do core's names get stored on disk?
-//!  i don't see it anywhere
-//!  it definitely *is* persisted somehow..
-//!  it looks like... it is used to derive the key for the hypercore
-//!  something like hash(primary-key + name) == key_for_core
-//! - How does this work with RAM?
-//!   - if I open a core named "A" an close it. Then open "A" again. Is it the same core?
-//!   - can I open the same core twice?
-//!
-//! - How does replication work
-//!
-//!
-//!Roadmap:
-//!1. just get
-//!  - get ram and fs by name
-//!2. hc "persists"
-//!  - just via name
-//!  - for ram, just when closed and re-opened, but CS still alive
-//!  - for disk same as above, and also when CS closed and re-opened
-//!  - then via dk
-//!3. key derivation correctness
-//!4. fs correctness
-//!5. replication
-//!6. namespacing
-//!
+//! Intended to be fully compatible with the [JavaScrpt `corestore`
+//! library](https://github.com/holepunchto/corestore).
 //!
 #![warn(
     missing_debug_implementations,

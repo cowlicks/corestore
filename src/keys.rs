@@ -1,7 +1,11 @@
-use hypercore::PartialKeypair;
+use crate::Result;
+use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
 use hypercore_protocol::DiscoveryKey;
 
-const OUT_SIZE: usize = 32;
+const DEFAULT_NAMESPACE: [u8; 32] = [0; 32];
+const SEED_SIZE: usize = 32;
+const SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES: usize = 32;
+const SODIUM_CRYPTO_SIGN_SECRETKEYBYTES: usize = 64;
 
 // comes from js corestore's
 // https://github.com/holepunchto/corestore/blob/1cca652289b3be5bdf3d5da258865e0d3eff6bf6/index.js#L11
@@ -15,27 +19,59 @@ fn namespace(name: &str, count: usize) -> Vec<[u8; 32]> {
     todo!()
 }
 
-pub unsafe fn deriveSeed(primary_key: [u8; 32], namespace: &str, name: &str) -> PartialKeypair {
-    let mut out = Vec::with_capacity(32);
+pub unsafe fn derive_seed(primary_key: [u8; 32], namespace: &[u8], name: &str) -> Vec<u8> {
+    let mut out = vec![0; SEED_SIZE];
     let mut input = Vec::new();
     let name_bytes: Vec<u8> = name.into();
     input.extend_from_slice(&NS);
-    //input.extend_from_slice(&names);
+    input.extend_from_slice(&namespace);
     input.extend_from_slice(&name_bytes);
 
     let ret = libsodium_sys::crypto_generichash(
         out.as_mut_ptr(),
-        OUT_SIZE,
+        SEED_SIZE,
         input.as_mut_ptr(),
         input.len() as u64,
         primary_key.as_ptr(),
         32,
     );
-    dbg!(&ret);
-    todo!()
+    return out;
+}
+
+pub fn create_key_pair(
+    primary_key: [u8; 32],
+    namespace: &[u8],
+    name: &str,
+) -> Result<PartialKeypair> {
+    let mut public_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES];
+    let mut secret_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_SECRETKEYBYTES];
+    unsafe {
+        let seed = derive_seed(primary_key, namespace, name);
+        libsodium_sys::crypto_sign_seed_keypair(
+            public_key.as_mut_ptr(),
+            secret_key.as_mut_ptr(),
+            seed.as_ptr(),
+        )
+    };
+    let signing_key = SigningKey::from_keypair_bytes(&secret_key.try_into().unwrap())?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key.try_into().unwrap())?;
+    Ok(PartialKeypair {
+        public: verifying_key,
+        secret: Some(signing_key),
+    })
 }
 
 #[test]
-fn key_from_name() {
-    todo!()
+fn check_derive_seed() {
+    // got this from running js's derive seed
+    let expected: [u8; 32] = [
+        117, 130, 149, 11, 198, 78, 24, 188, 218, 87, 207, 216, 125, 230, 173, 2, 87, 46, 17, 230,
+        83, 183, 172, 238, 22, 26, 25, 12, 47, 20, 163, 11,
+    ];
+    let name = "foo";
+    let primary_key = std::fs::read("data/primary-key").unwrap();
+
+    let result = unsafe { derive_seed(primary_key.try_into().unwrap(), &DEFAULT_NAMESPACE, name) };
+
+    assert_eq!(result, expected);
 }

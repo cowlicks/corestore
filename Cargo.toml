@@ -12,6 +12,7 @@ random-access-disk = { version = "3.0.1", default-features = false, features = [
 tokio = { version = "1.40.0", features = ["macros", "test-util"] }
 data-encoding = "2.6.0"
 libsodium-sys-stable = "1.21.2"
+signature = "2.2.0"
 
 [dependencies.hypercore]
 git = "https://github.com/cowlicks/hypercore.git"

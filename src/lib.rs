@@ -37,6 +37,8 @@ pub enum Error {
     Hypercore(#[from] HypercoreError),
     #[error("error from hypercore CoreMethods: {0}")]
     CoreMethods(#[from] CoreMethodsError),
+    #[error("Signature error")]
+    Signature(#[from] signature::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;

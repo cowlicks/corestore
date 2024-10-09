@@ -13,6 +13,7 @@ tokio = { version = "1.40.0", features = ["macros", "test-util"] }
 data-encoding = "2.6.0"
 libsodium-sys-stable = "1.21.2"
 signature = "2.2.0"
+rand = "0.8.5"
 
 [dependencies.hypercore]
 git = "https://github.com/cowlicks/hypercore.git"

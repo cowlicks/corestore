@@ -1,8 +1,8 @@
-use crate::Result;
+use crate::{id_from_dk, Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
-use hypercore_protocol::DiscoveryKey;
+use hypercore_protocol::{discovery_key, DiscoveryKey};
 
-const DEFAULT_NAMESPACE: [u8; 32] = [0; 32];
+pub const DEFAULT_NAMESPACE: Namespace = [0; 32];
 const SEED_SIZE: usize = 32;
 const SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES: usize = 32;
 const SODIUM_CRYPTO_SIGN_SECRETKEYBYTES: usize = 64;
@@ -15,16 +15,12 @@ const NS: [u8; 32] = [
     235, 236, 237, 3, 21, 23, 67, 39, 13, 239, 41,
 ];
 
-fn namespace(name: &str, count: usize) -> Vec<[u8; 32]> {
-    todo!()
-}
-
-pub unsafe fn derive_seed(primary_key: [u8; 32], namespace: &[u8], name: &str) -> Vec<u8> {
+pub unsafe fn derive_seed(primary_key: PrimaryKey, namespace: &Namespace, name: &str) -> Vec<u8> {
     let mut out = vec![0; SEED_SIZE];
     let mut input = Vec::new();
     let name_bytes: Vec<u8> = name.into();
     input.extend_from_slice(&NS);
-    input.extend_from_slice(&namespace);
+    input.extend_from_slice(namespace);
     input.extend_from_slice(&name_bytes);
 
     let ret = libsodium_sys::crypto_generichash(
@@ -39,8 +35,8 @@ pub unsafe fn derive_seed(primary_key: [u8; 32], namespace: &[u8], name: &str) -
 }
 
 pub fn create_key_pair(
-    primary_key: [u8; 32],
-    namespace: &[u8],
+    primary_key: PrimaryKey,
+    namespace: &DiscoveryKey,
     name: &str,
 ) -> Result<PartialKeypair> {
     let mut public_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES];
@@ -59,6 +55,15 @@ pub fn create_key_pair(
         public: verifying_key,
         secret: Some(signing_key),
     })
+}
+
+pub fn core_id_from_name(
+    primary_key: PrimaryKey,
+    namespace: &Namespace,
+    name: &str,
+) -> Result<String> {
+    let keys = create_key_pair(primary_key, namespace, name)?;
+    Ok(id_from_dk(&discovery_key(&keys.public.to_bytes())))
 }
 
 #[test]

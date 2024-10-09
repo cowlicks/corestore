@@ -12,7 +12,7 @@
     non_local_definitions
 )]
 
-mod keys;
+pub mod keys;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -27,8 +27,11 @@ use hypercore::{
 use hypercore_protocol::{discovery_key, DiscoveryKey};
 use random_access_memory::RandomAccessMemory;
 
-const CORES_DIR: &str = "cores";
-const _PRIMARY_KEY_FILE: &str = "primary-key";
+const CORES_DIR_NAME: &str = "cores";
+const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
+
+type PrimaryKey = [u8; 32];
+type Namespace = [u8; 32];
 
 /// Corestore's Errors
 #[derive(thiserror::Error, Debug)]
@@ -64,6 +67,7 @@ impl StorageKind {
                 Ok(SharedCore::from(hc))
             }
             StorageKind::Disk(path) => {
+                //let keypair = keys::create_key_pair(
                 let full_path = path.join(name);
                 let s = Storage::new_disk(&full_path, false).await?;
                 let hc = HypercoreBuilder::new(s).build().await?;
@@ -81,32 +85,30 @@ impl From<RandomAccessMemory> for StorageKind {
 #[derive(Debug, Default)]
 struct CoreCache {
     dk_to_cores: BTreeMap<DiscoveryKey, SharedCore>,
-    name_to_dk: BTreeMap<String, DiscoveryKey>,
+}
+
+fn id_from_name(name: &str, primary_key: PrimaryKey) -> DiscoveryKey {
+    todo!()
 }
 
 impl CoreCache {
+    // get the dk from a name
     fn insert_by_dk(&mut self, dk: DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
         self.dk_to_cores.insert(dk, core)
     }
 
-    fn insert_name_and_dk(
-        &mut self,
-        name: &str,
-        dk: DiscoveryKey,
-        core: SharedCore,
-    ) -> (Option<DiscoveryKey>, Option<SharedCore>) {
-        (
-            self.name_to_dk.insert(name.to_string(), dk),
-            self.insert_by_dk(dk, core),
-        )
+    fn get_by_dk(&mut self, dk: DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
+        self.dk_to_cores.get(&dk).cloned()
     }
 
-    fn get_dk(&self, dk: &DiscoveryKey) -> Option<SharedCore> {
-        self.dk_to_cores.get(dk).cloned()
+    fn insert_by_name(&mut self, name: &str, core: SharedCore) -> Option<SharedCore> {
+        todo!()
+        //self.dk_to_cores.insert(dk, core)
     }
 
-    fn get_name(&self, name: &str) -> Option<SharedCore> {
-        self.get_dk(self.name_to_dk.get(name)?)
+    fn get_by_name(&self, name: &str) -> Option<SharedCore> {
+        todo!()
+        //self.dk_to_cores.get(dk).cloned()
     }
 }
 
@@ -122,7 +124,7 @@ fn id_from_dk(dk: &DiscoveryKey) -> String {
 
 fn get_storage_root(id: &str) -> String {
     format!(
-        "{CORES_DIR}/{}/{}/{id}",
+        "{CORES_DIR_NAME}/{}/{}/{id}",
         id[0..2].to_string(),
         id[2..4].to_string()
     )
@@ -138,29 +140,25 @@ impl Corestore {
 
     /// Get a hypercore by name. If the core does not exist, create it.
     pub async fn get_from_name(&mut self, name: &str) -> Result<SharedCore> {
-        if let Some(core) = self.core_cache.get_name(name) {
+        if let Some(core) = self.core_cache.get_by_name(name) {
             return Ok(core);
         };
+        // gets or create core
         let core = self.storage.get_from_name(name).await?;
-        let dk = discovery_key(&core.key_pair().await.public.to_bytes());
-        self.core_cache.insert_name_and_dk(name, dk, core.clone());
+        // insert it by dk into the cache
+        //let dk = discovery_key(&core.key_pair().await.public.to_bytes()); self.core_cache.insert_name_and_dk(name, dk, core.clone());
         Ok(core)
     }
 
-    /// Get a hypercore by name. If the core does not exist, create it.
+    /// Get a hypercore by
     pub async fn get_from_discover_key(
         &mut self,
         key: &DiscoveryKey,
     ) -> Result<Option<SharedCore>> {
-        if let Some(core) = self.core_cache.get_dk(key) {
-            return Ok(Some(core));
-        };
-        let id = id_from_dk(key);
-        let name = get_storage_root(&id);
-        let core = self.storage.get_from_name(&name).await?;
-        self.core_cache
-            .insert_name_and_dk(&name, *key, core.clone());
-        Ok(Some(core))
+        //if let Some(core) = self.core_cache.get_dk(key) {
+        //    return Ok(Some(core));
+        //};
+        todo!()
     }
 }
 

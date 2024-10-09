@@ -1,3 +1,50 @@
+/*
+ * Keys:
+ * We a bunch of names for related things:
+ * `PartialKeypair`, `SigningKey`, `VerifyingKey`, `PrimaryKey`, `DiscoveryKey` and `Key`
+ * first notice:
+ * ```
+ * PartialKeypair {
+ *  public: VerifyingKey,
+ *  secret: Option<SigningKey>,
+ * }
+ * ```
+ * When `PartialKeypair::secret.is_some()` you can write to a core, when it `is_none()` you are a
+ * reader. But use still use the `PartialKeypair` to verify data.
+ *
+ * also `VerifyingKey` impls `From<&SigningKey>`. So the full `PartialKeypair` can be defined from
+ * a `SigningKey`.
+ *
+ * What is a `PrimaryKey`. It is just 32 cyptograpically random bytes.
+ * It is used to derive the `SigningKey` for each new hypercore the corestore has
+ *
+ * We use `PrimaryKey` to deterministically derive new `PartialKeypair`'s.
+ * see [`create_key_pair`]
+ *
+ * `DiscoveryKey` is derived from `VerifyingKey`:
+ * ```
+ * hypercore_protocol::discovery_key(verifying_key.as_bytes())
+ * ```
+ * where it is basically just hashed
+ *
+ * there is also the `id` of a hypercore that corestore uses as the name of the directory the
+ * hypercore data is stored in.
+ *
+ *
+ * What is `Key`?
+ * it seems like it is a shared secret that is used to initiate a connection with a remote
+ * hypercore.
+ * created as [0u8;32] in proto/benches/pipe.rs???
+ * it is `DiscoveryKey` bytes in proto/examples/replication.rs
+ * So it seems like it is derived arbitrarily.
+ * What does js use for this "key"?
+ *
+ * So keys are all derived from primary key like:
+ * ```
+ * PrimaryKey (+ name) -> SigningKey -> VerifyingKey & PartialKeypair -> DiscoveryKey
+ *
+*/
+#![allow(unused_variables)]
 use crate::{id_from_dk, Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
 use hypercore_protocol::{discovery_key, DiscoveryKey};

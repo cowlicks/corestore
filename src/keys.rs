@@ -45,7 +45,7 @@
  *
 */
 #![allow(unused_variables)]
-use crate::{id_from_dk, Namespace, PrimaryKey, Result};
+use crate::{id_from_key_pair, Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
 use hypercore_protocol::{discovery_key, DiscoveryKey};
 
@@ -81,9 +81,9 @@ pub unsafe fn derive_seed(primary_key: PrimaryKey, namespace: &Namespace, name: 
     return out;
 }
 
-pub fn create_key_pair(
+pub fn key_pair_from_name(
     primary_key: PrimaryKey,
-    namespace: &DiscoveryKey,
+    namespace: &Namespace,
     name: &str,
 ) -> Result<PartialKeypair> {
     let mut public_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES];
@@ -103,14 +103,27 @@ pub fn create_key_pair(
         secret: Some(signing_key),
     })
 }
+pub fn dk_from_name(
+    primary_key: PrimaryKey,
+    namespace: &Namespace,
+    name: &str,
+) -> Result<DiscoveryKey> {
+    let keys = key_pair_from_name(primary_key, namespace, name)?;
+    let kp: &PartialKeypair = &keys;
+    Ok(discovery_key(&kp.public.to_bytes()))
+}
 
 pub fn core_id_from_name(
     primary_key: PrimaryKey,
     namespace: &Namespace,
     name: &str,
 ) -> Result<String> {
-    let keys = create_key_pair(primary_key, namespace, name)?;
-    Ok(id_from_dk(&discovery_key(&keys.public.to_bytes())))
+    let keys = key_pair_from_name(primary_key, namespace, name)?;
+    Ok({
+        let kp: &PartialKeypair = &keys;
+        let dk = discovery_key(&kp.public.to_bytes());
+        data_encoding::HEXLOWER.encode(&dk)
+    })
 }
 
 #[test]

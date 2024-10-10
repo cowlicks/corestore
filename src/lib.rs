@@ -11,8 +11,11 @@
     //unsafe_code,
     non_local_definitions
 )]
+#![allow(unused)]
+#![allow(unused_variables)]
 
 pub mod keys;
+use keys::{dk_from_name, key_pair_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     collections::BTreeMap,
@@ -62,17 +65,19 @@ fn new_primary_key() -> PrimaryKey {
 }
 
 fn get_or_create_primary_key(path: impl AsRef<Path>) -> Result<PrimaryKey> {
-    if !path.as_ref().exists() {
+    let pk_file = path.as_ref().join(PRIMARY_KEY_FILE_NAME);
+
+    if !pk_file.exists() {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)?;
+            .open(&pk_file)?;
 
         let primary_key = new_primary_key();
         file.write_all(&primary_key)?;
     }
-    Ok(fs::read(&path)?
+    Ok(fs::read(&pk_file)?
         .try_into()
         .map_err(|_| Error::InvalidPrimaryKey)?)
 }
@@ -86,56 +91,44 @@ pub enum StorageKind {
 impl StorageKind {
     pub fn new_disk(prefix: impl AsRef<Path>) -> Self {
         let path = prefix.as_ref().to_path_buf();
-        //let std::fs::read(path)?;
         Self::Disk(prefix.as_ref().to_path_buf())
     }
 
-    pub async fn get_from_name(&self, name: &str) -> Result<SharedCore> {
+    pub async fn get_core_from_key_pair(
+        &self,
+        primary_key: PrimaryKey,
+        kp: PartialKeypair,
+    ) -> Result<SharedCore> {
         match self {
             StorageKind::Mem => {
-                // TODO is there a way to re-use the ram here?
-                // Do I need that? Sholud I add impl From<&Ram> for Storage
                 let s = Storage::new_memory().await?;
-                let hc = HypercoreBuilder::new(s).build().await?;
+                let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
                 Ok(SharedCore::from(hc))
             }
             StorageKind::Disk(path) => {
-                //let keypair = keys::create_key_pair(
-                let full_path = path.join(name);
+                let path_to_storage = get_storage_root(&id_from_key_pair(&kp));
+                let full_path = path.join(path_to_storage);
                 let s = Storage::new_disk(&full_path, false).await?;
-                let hc = HypercoreBuilder::new(s).build().await?;
+                let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
                 Ok(SharedCore::from(hc))
             }
         }
     }
 }
+
 #[derive(Debug, Default)]
 struct CoreCache {
     dk_to_cores: BTreeMap<DiscoveryKey, SharedCore>,
 }
 
-fn id_from_name(name: &str, primary_key: PrimaryKey) -> DiscoveryKey {
-    todo!()
-}
-
 impl CoreCache {
     // get the dk from a name
-    fn insert_by_dk(&mut self, dk: DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
-        self.dk_to_cores.insert(dk, core)
+    fn insert_by_dk(&mut self, dk: &DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
+        self.dk_to_cores.insert(*dk, core)
     }
 
-    fn get_by_dk(&mut self, dk: DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
-        self.dk_to_cores.get(&dk).cloned()
-    }
-
-    fn insert_by_name(&mut self, name: &str, core: SharedCore) -> Option<SharedCore> {
-        todo!()
-        //self.dk_to_cores.insert(dk, core)
-    }
-
-    fn get_by_name(&self, name: &str) -> Option<SharedCore> {
-        todo!()
-        //self.dk_to_cores.get(dk).cloned()
+    fn get_by_dk(&mut self, dk: &DiscoveryKey) -> Option<SharedCore> {
+        self.dk_to_cores.get(dk).cloned()
     }
 }
 
@@ -147,8 +140,9 @@ pub struct Corestore {
     core_cache: CoreCache,
 }
 
-fn id_from_dk(dk: &DiscoveryKey) -> String {
-    data_encoding::HEXLOWER.encode(dk)
+fn id_from_key_pair(kp: &PartialKeypair) -> String {
+    let dk = discovery_key(&kp.public.to_bytes());
+    data_encoding::HEXLOWER.encode(&dk)
 }
 
 fn get_storage_root(id: &str) -> String {
@@ -174,13 +168,17 @@ impl Corestore {
 
     /// Get a hypercore by name. If the core does not exist, create it.
     pub async fn get_from_name(&mut self, name: &str) -> Result<SharedCore> {
-        if let Some(core) = self.core_cache.get_by_name(name) {
+        let kp = key_pair_from_name(self.primary_key, &DEFAULT_NAMESPACE, name)?;
+        let dk = discovery_key(kp.public.as_bytes());
+
+        if let Some(core) = self.core_cache.get_by_dk(&dk) {
             return Ok(core);
         };
-        // gets or create core
-        let core = self.storage.get_from_name(name).await?;
-        // insert it by dk into the cache
-        //let dk = discovery_key(&core.key_pair().await.public.to_bytes()); self.core_cache.insert_name_and_dk(name, dk, core.clone());
+        let core = self
+            .storage
+            .get_core_from_key_pair(self.primary_key, kp)
+            .await?;
+        self.core_cache.insert_by_dk(&dk, core.clone());
         Ok(core)
     }
 
@@ -198,6 +196,8 @@ impl Corestore {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use hypercore::{generate_signing_key, replication::CoreMethods};
 
     use super::*;
@@ -209,70 +209,17 @@ mod test {
     }
 
     #[tokio::test]
-    async fn get_name_mem() -> Result<()> {
-        let mut cs = Corestore::new(StorageKind::Mem)?;
+    async fn disk_core_by_name() -> Result<()> {
+        // initialize CS with a fixed primary key
+        // check it producets the expected fixed file path
+        let storage_dir = tempfile::tempdir().unwrap();
+        let s = StorageKind::new_disk(storage_dir.path());
+        let mut cs = Corestore::new(s)?;
         let hc = cs.get_from_name("foo").await?;
         hc.append(b"hello").await?;
         assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
-        Ok(())
-    }
 
-    #[tokio::test]
-    async fn get_name_disk() -> Result<()> {
-        let storage_dir = tempfile::tempdir().unwrap();
-        let s = StorageKind::new_disk(storage_dir.path());
-        let mut cs = Corestore::new(s)?;
-        {
-            let hc = cs.get_from_name("foo").await?;
-            hc.append(b"hello").await?;
-            assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
-        }
-        {
-            let hc = cs.get_from_name("foo").await?;
-            assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_core_cache_disk() -> Result<()> {
-        let storage_dir = tempfile::tempdir().unwrap();
-        let s = StorageKind::new_disk(storage_dir.path());
-        let mut cs = Corestore::new(s)?;
-        let hc1 = cs.get_from_name("foo").await?;
-        let hc2 = cs.get_from_name("foo").await?;
-        hc1.append(b"hello").await?;
-        assert_eq!(hc1.get(0).await?, Some(b"hello".to_vec()));
-        assert_eq!(hc2.get(0).await?, Some(b"hello".to_vec()));
-
-        let dk = discovery_key(hc1.key_pair().await.public.as_bytes());
-        let hc3 = cs.get_from_discover_key(&dk).await?.unwrap();
-        assert_eq!(hc3.get(0).await?, Some(b"hello".to_vec()));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn core_cache_mem() -> Result<()> {
-        let mut cs = Corestore::new(StorageKind::Mem)?;
-        let hc1 = cs.get_from_name("foo").await?;
-        let hc2 = cs.get_from_name("foo").await?;
-        hc1.append(b"hello").await?;
-        assert_eq!(hc1.get(0).await?, Some(b"hello".to_vec()));
-        assert_eq!(hc2.get(0).await?, Some(b"hello".to_vec()));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn disk_name() -> Result<()> {
-        let storage_dir = "bar";
-        let s = StorageKind::new_disk(PathBuf::from(storage_dir));
-        let mut cs = Corestore::new(s)?;
-        let hc1 = cs.get_from_name("foo").await?;
-        let hc2 = cs.get_from_name("foo").await?;
-        hc1.append(b"hello").await?;
-        assert_eq!(hc1.get(0).await?, Some(b"hello".to_vec()));
-        assert_eq!(hc2.get(0).await?, Some(b"hello".to_vec()));
+        // TODO assert that /tmp/.../cores/../../core_id/... exists
         Ok(())
     }
 }

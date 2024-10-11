@@ -15,6 +15,9 @@ libsodium-sys-stable = "1.21.2"
 signature = "2.2.0"
 rand = "0.8.5"
 derive_builder = "0.20.2"
+futures-lite = "2.3.0"
+replicator = { path = "../replicator/replicator" }
+
 
 [dependencies.hypercore]
 git = "https://github.com/cowlicks/hypercore.git"

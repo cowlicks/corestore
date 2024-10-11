@@ -1,7 +1,14 @@
 /*
  * Keys:
  * We a bunch of names for related things:
- * `PartialKeypair`, `SigningKey`, `VerifyingKey`, `PrimaryKey`, `DiscoveryKey` and `Key`
+ * - `hc::PartialKeypair` ({ public: VerifyingKey, secret: SigningKey })
+ * - `hc::SigningKey` (from ed25519::SigningKey`)
+ * - `hc::VerifyingKey` (from ed25519::VerifyingKey`)
+ * - `hc::SecretKey` (from ed25519::SecretKey`) only used in proto
+ * - `corestore::PrimaryKey`
+ * - `proto::protocol::DiscoveryKey`
+ * - `proto::protocol::Key`
+ * - `proto::protocol::RemotePublicKey`
  * first notice:
  * ```
  * PartialKeypair {

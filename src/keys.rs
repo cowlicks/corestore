@@ -44,11 +44,8 @@
  * PrimaryKey (+ name) -> SigningKey -> VerifyingKey & PartialKeypair -> DiscoveryKey
  *
 */
-#![allow(unused_variables)]
-use crate::{Namespace, PrimaryKey, Result};
+use crate::{Error, Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
-use hypercore_protocol::{discovery_key, DiscoveryKey};
-
 pub const DEFAULT_NAMESPACE: Namespace = [0; 32];
 const SEED_SIZE: usize = 32;
 const SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES: usize = 32;
@@ -62,7 +59,11 @@ const NS: [u8; 32] = [
     235, 236, 237, 3, 21, 23, 67, 39, 13, 239, 41,
 ];
 
-pub unsafe fn derive_seed(primary_key: PrimaryKey, namespace: &Namespace, name: &str) -> Vec<u8> {
+pub unsafe fn derive_seed(
+    primary_key: PrimaryKey,
+    namespace: &Namespace,
+    name: &str,
+) -> Result<Vec<u8>> {
     let mut out = vec![0; SEED_SIZE];
     let mut input = Vec::new();
     let name_bytes: Vec<u8> = name.into();
@@ -78,7 +79,10 @@ pub unsafe fn derive_seed(primary_key: PrimaryKey, namespace: &Namespace, name: 
         primary_key.as_ptr(),
         32,
     );
-    return out;
+    if ret != 0 {
+        return Err(Error::LibSodiumGenericHashError(ret));
+    }
+    Ok(out)
 }
 
 pub fn key_pair_from_name(
@@ -89,12 +93,15 @@ pub fn key_pair_from_name(
     let mut public_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES];
     let mut secret_key: Vec<u8> = vec![0; SODIUM_CRYPTO_SIGN_SECRETKEYBYTES];
     unsafe {
-        let seed = derive_seed(primary_key, namespace, name);
-        libsodium_sys::crypto_sign_seed_keypair(
+        let seed = derive_seed(primary_key, namespace, name)?;
+        let ret = libsodium_sys::crypto_sign_seed_keypair(
             public_key.as_mut_ptr(),
             secret_key.as_mut_ptr(),
             seed.as_ptr(),
-        )
+        );
+        if ret != 0 {
+            return Err(Error::LibSodiumSignSeedKeypair(ret));
+        }
     };
     let signing_key = SigningKey::from_keypair_bytes(&secret_key.try_into().unwrap())?;
     let verifying_key = VerifyingKey::from_bytes(&public_key.try_into().unwrap())?;
@@ -111,17 +118,8 @@ pub fn verifying_key_from_name(
     Ok(key_pair_from_name(primary_key, namespace, name)?.public)
 }
 
-pub fn core_id_from_name(
-    primary_key: PrimaryKey,
-    namespace: &Namespace,
-    name: &str,
-) -> Result<String> {
-    Ok(data_encoding::HEXLOWER
-        .encode(verifying_key_from_name(primary_key, namespace, name)?.as_bytes()))
-}
-
 #[test]
-fn check_derive_seed() {
+fn check_derive_seed() -> Result<()> {
     // got this from running js's derive seed
     let expected: [u8; 32] = [
         117, 130, 149, 11, 198, 78, 24, 188, 218, 87, 207, 216, 125, 230, 173, 2, 87, 46, 17, 230,
@@ -130,7 +128,8 @@ fn check_derive_seed() {
     let name = "foo";
     let primary_key = std::fs::read("data/primary-key").unwrap();
 
-    let result = unsafe { derive_seed(primary_key.try_into().unwrap(), &DEFAULT_NAMESPACE, name) };
+    let result = unsafe { derive_seed(primary_key.try_into().unwrap(), &DEFAULT_NAMESPACE, name)? };
 
     assert_eq!(result, expected);
+    Ok(())
 }

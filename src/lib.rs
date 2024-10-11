@@ -2,7 +2,6 @@
 //! [`Corestore`] provides a way to manage a related group of [`SharedCore`]s.
 //! Intended to be fully compatible with the [JavaScrpt `corestore`
 //! library](https://github.com/holepunchto/corestore).
-//!
 #![warn(
     missing_debug_implementations,
     //missing_docs,
@@ -15,11 +14,12 @@
 #![allow(unused_variables)]
 
 pub mod keys;
-use keys::{dk_from_name, key_pair_from_name, DEFAULT_NAMESPACE};
+use keys::{key_pair_from_name, verifying_key_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
-    collections::BTreeMap,
-    fs::{self, OpenOptions},
+    collections::{BTreeMap, HashMap},
+    env::join_paths,
+    fs::{self, read, write, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -41,6 +41,7 @@ type PrimaryKey = [u8; 32];
 type Namespace = [u8; 32];
 
 /// Corestore's Errors
+#[non_exhaustive]
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("error from hypercore: {0}")]
@@ -53,33 +54,19 @@ pub enum Error {
     FsError(#[from] std::io::Error),
     #[error("Invalid primary key")]
     InvalidPrimaryKey,
+    #[error("Fs error")]
+    BuilderError(#[from] CorestoreBuilderError),
+    #[error("Could not build corestore because a primary key value was provided, but one already exists on disk at [{0}]")]
+    PrimaryKeyConflict(String),
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn new_primary_key() -> PrimaryKey {
+fn generate_primary_key() -> PrimaryKey {
     let mut csprng = OsRng;
     let mut primary_key = [0u8; 32];
     csprng.fill_bytes(&mut primary_key);
     primary_key
-}
-
-fn get_or_create_primary_key(path: impl AsRef<Path>) -> Result<PrimaryKey> {
-    let pk_file = path.as_ref().join(PRIMARY_KEY_FILE_NAME);
-
-    if !pk_file.exists() {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&pk_file)?;
-
-        let primary_key = new_primary_key();
-        file.write_all(&primary_key)?;
-    }
-    Ok(fs::read(&pk_file)?
-        .try_into()
-        .map_err(|_| Error::InvalidPrimaryKey)?)
 }
 
 #[derive(Debug)]
@@ -106,7 +93,7 @@ impl StorageKind {
                 Ok(SharedCore::from(hc))
             }
             StorageKind::Disk(path) => {
-                let path_to_storage = get_storage_root(&id_from_key_pair(&kp));
+                let path_to_storage = get_storage_root(&kp);
                 let full_path = path.join(path_to_storage);
                 let s = Storage::new_disk(&full_path, false).await?;
                 let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
@@ -114,83 +101,164 @@ impl StorageKind {
             }
         }
     }
+
+    pub async fn get_core_from_dk(
+        &self,
+        verifying_key: &VerifyingKey,
+    ) -> Result<Option<SharedCore>> {
+        match self {
+            StorageKind::Mem => Ok(None),
+            StorageKind::Disk(path) => {
+                let path_to_storage: PathBuf = get_storage_root(verifying_key).into();
+                let full_path = path.join(path_to_storage);
+                if full_path.exists() {
+                    todo!()
+                }
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct CoreCache {
-    dk_to_cores: BTreeMap<DiscoveryKey, SharedCore>,
+    verifying_key_to_cores: HashMap<VerifyingKey, SharedCore>,
 }
 
 impl CoreCache {
     // get the dk from a name
-    fn insert_by_dk(&mut self, dk: &DiscoveryKey, core: SharedCore) -> Option<SharedCore> {
-        self.dk_to_cores.insert(*dk, core)
+    fn insert_by_verifying_key(
+        &mut self,
+        verifying_key: &VerifyingKey,
+        core: SharedCore,
+    ) -> Option<SharedCore> {
+        self.verifying_key_to_cores.insert(*verifying_key, core)
     }
 
-    fn get_by_dk(&mut self, dk: &DiscoveryKey) -> Option<SharedCore> {
-        self.dk_to_cores.get(dk).cloned()
+    fn get_by_verifying_key(&self, verifying_key: &VerifyingKey) -> Option<SharedCore> {
+        self.verifying_key_to_cores.get(verifying_key).cloned()
     }
+}
+
+#[derive(Debug)]
+enum Role {
+    Writer,
+    Reader,
+}
+
+struct StorageId(String);
+
+impl From<&VerifyingKey> for StorageId {
+    fn from(value: &VerifyingKey) -> Self {
+        StorageId(data_encoding::HEXLOWER.encode(value.as_bytes()))
+    }
+}
+
+impl From<&PartialKeypair> for StorageId {
+    fn from(value: &PartialKeypair) -> Self {
+        StorageId(data_encoding::HEXLOWER.encode(&value.public.to_bytes()))
+    }
+}
+fn get_storage_root<T: Into<StorageId>>(to_id: T) -> PathBuf {
+    let id: StorageId = to_id.into();
+
+    format!(
+        "{CORES_DIR_NAME}/{}/{}/{}",
+        id.0[0..2].to_string(),
+        id.0[2..4].to_string(),
+        id.0
+    )
+    .into()
 }
 
 // TODO add primary_key here. Get it from the cores dir or create it
-#[derive(Debug)]
+#[derive(Debug, derive_builder::Builder)]
+#[builder(pattern = "owned", build_fn(skip), derive(Debug))]
 pub struct Corestore {
     primary_key: PrimaryKey,
     storage: StorageKind,
+    #[builder(default = "Default::default()")]
     core_cache: CoreCache,
+    role: Role,
 }
 
-fn id_from_key_pair(kp: &PartialKeypair) -> String {
-    let dk = discovery_key(&kp.public.to_bytes());
-    data_encoding::HEXLOWER.encode(&dk)
-}
+impl CorestoreBuilder {
+    fn build(self) -> std::result::Result<Corestore, Error> {
+        dbg!();
+        let Some(role) = self.role else {
+            return Err(CorestoreBuilderError::UninitializedField("role").into());
+        };
 
-fn get_storage_root(id: &str) -> String {
-    format!(
-        "{CORES_DIR_NAME}/{}/{}/{id}",
-        id[0..2].to_string(),
-        id[2..4].to_string()
-    )
+        let Some(storage) = self.storage else {
+            return Err(CorestoreBuilderError::UninitializedField("storage").into());
+        };
+        // Somewhat complicated primary key logic
+        dbg!();
+        let primary_key: PrimaryKey = match role {
+            Role::Reader => todo!(),
+            Role::Writer => match storage {
+                StorageKind::Mem => generate_primary_key(),
+                StorageKind::Disk(ref path) => {
+                    let pk_path = path.join(PRIMARY_KEY_FILE_NAME);
+                    // key file exists on disk
+                    if pk_path.exists() {
+                        if self.primary_key.is_some() {
+                            return Err(Error::PrimaryKeyConflict(pk_path.display().to_string()));
+                        }
+                        std::fs::read(pk_path)?
+                            .try_into()
+                            // Fail if key on disk is invalid
+                            .map_err(|_| Error::InvalidPrimaryKey)?
+                    } else {
+                        // No existing key on disk, create one
+                        let pk = generate_primary_key();
+                        write(pk_path, &pk);
+                        pk
+                    }
+                }
+            },
+        };
+        Ok(Corestore {
+            primary_key,
+            storage,
+            core_cache: self.core_cache.unwrap_or_default(),
+            role,
+        })
+    }
 }
 
 impl Corestore {
-    pub fn new(storage: StorageKind) -> Result<Self> {
-        let primary_key = match &storage {
-            StorageKind::Mem => new_primary_key(),
-            StorageKind::Disk(path) => get_or_create_primary_key(path)?,
-        };
-        Ok(Self {
-            primary_key,
-            storage,
-            core_cache: Default::default(),
-        })
-    }
-
     /// Get a hypercore by name. If the core does not exist, create it.
     pub async fn get_from_name(&mut self, name: &str) -> Result<SharedCore> {
         let kp = key_pair_from_name(self.primary_key, &DEFAULT_NAMESPACE, name)?;
-        let dk = discovery_key(kp.public.as_bytes());
 
-        if let Some(core) = self.core_cache.get_by_dk(&dk) {
+        if let Some(core) = self.core_cache.get_by_verifying_key(&kp.public) {
             return Ok(core);
         };
         let core = self
             .storage
-            .get_core_from_key_pair(self.primary_key, kp)
+            .get_core_from_key_pair(self.primary_key, kp.clone())
             .await?;
-        self.core_cache.insert_by_dk(&dk, core.clone());
+        self.core_cache
+            .insert_by_verifying_key(&kp.public, core.clone());
         Ok(core)
     }
 
-    /// Get a hypercore by
-    pub async fn get_from_discover_key(
-        &mut self,
-        key: &DiscoveryKey,
+    pub async fn get_from_verifying_key(
+        &self,
+        verifying_key: &VerifyingKey,
     ) -> Result<Option<SharedCore>> {
-        //if let Some(core) = self.core_cache.get_dk(key) {
-        //    return Ok(Some(core));
-        //};
-        todo!()
+        if let Some(core) = self.core_cache.get_by_verifying_key(&verifying_key) {
+            return Ok(Some(core));
+        };
+        match &self.storage {
+            StorageKind::Mem => Ok(None),
+            StorageKind::Disk(path) => {
+                let core_path = path.join(get_storage_root(verifying_key));
+                if core_path.exists() {}
+                todo!()
+            }
+        }
     }
 }
 
@@ -202,10 +270,15 @@ mod test {
 
     use super::*;
 
+    const TEST_PK: PrimaryKey = [
+        124, 229, 174, 223, 232, 201, 160, 10, 235, 143, 37, 249, 107, 92, 35, 125, 68, 246, 2,
+        197, 41, 248, 234, 65, 9, 222, 77, 144, 50, 243, 222, 65,
+    ];
+
     #[test]
     fn get_storage_dir_matches_js() {
-        let id = "helloworld";
-        assert_eq!(get_storage_root(id), "cores/he/ll/helloworld");
+        let id = StorageId("helloworld".to_string());
+        assert_eq!(get_storage_root(id).as_os_str(), "cores/he/ll/helloworld");
     }
 
     #[tokio::test]
@@ -213,13 +286,65 @@ mod test {
         // initialize CS with a fixed primary key
         // check it producets the expected fixed file path
         let storage_dir = tempfile::tempdir().unwrap();
-        let s = StorageKind::new_disk(storage_dir.path());
-        let mut cs = Corestore::new(s)?;
+        let mut pk = TEST_PK.clone();
+        pk[0] = 0;
+
+        let mut cs = CorestoreBuilder::default()
+            .primary_key(pk)
+            .role(Role::Writer)
+            .storage(StorageKind::new_disk(storage_dir.path()))
+            .build()?;
+
         let hc = cs.get_from_name("foo").await?;
         hc.append(b"hello").await?;
         assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
+        let vk = hc.key_pair().await.public;
 
-        // TODO assert that /tmp/.../cores/../../core_id/... exists
+        let core_path = storage_dir.path().join(get_storage_root(&vk));
+        assert!(core_path.exists());
+
+        let hc2 = cs.get_from_verifying_key(&vk).await?.unwrap();
+        assert_eq!(hc2.get(0).await?, Some(b"hello".to_vec()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn primary_key_cstore_dir_gets_used() -> Result<()> {
+        let storage_dir = tempfile::tempdir().unwrap();
+        let mut pk = TEST_PK.clone();
+        pk[0] = 1;
+
+        {
+            let mut cs = CorestoreBuilder::default()
+                .role(Role::Writer)
+                .primary_key(pk)
+                .storage(StorageKind::new_disk(storage_dir.path()))
+                .build()?;
+
+            let hc = cs.get_from_name("foo").await?;
+            hc.append(b"hello").await?;
+        }
+        {
+            // corestore uses pk in directory if it exists already
+            let mut cs = CorestoreBuilder::default()
+                .storage(StorageKind::new_disk(storage_dir.path()))
+                .role(Role::Writer)
+                .build()?;
+            let hc = cs.get_from_name("foo").await?;
+            assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
+        }
+        {
+            // providing a pk while there is one on disk is err
+            assert!(matches!(
+                CorestoreBuilder::default()
+                    .storage(StorageKind::new_disk(storage_dir.path()))
+                    .primary_key(pk)
+                    .role(Role::Writer)
+                    .build(),
+                Err(Error::PrimaryKeyConflict(_))
+            ));
+        }
+
         Ok(())
     }
 }

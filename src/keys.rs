@@ -45,7 +45,7 @@
  *
 */
 #![allow(unused_variables)]
-use crate::{id_from_key_pair, Namespace, PrimaryKey, Result};
+use crate::{Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};
 use hypercore_protocol::{discovery_key, DiscoveryKey};
 
@@ -103,14 +103,12 @@ pub fn key_pair_from_name(
         secret: Some(signing_key),
     })
 }
-pub fn dk_from_name(
+pub fn verifying_key_from_name(
     primary_key: PrimaryKey,
     namespace: &Namespace,
     name: &str,
-) -> Result<DiscoveryKey> {
-    let keys = key_pair_from_name(primary_key, namespace, name)?;
-    let kp: &PartialKeypair = &keys;
-    Ok(discovery_key(&kp.public.to_bytes()))
+) -> Result<VerifyingKey> {
+    Ok(key_pair_from_name(primary_key, namespace, name)?.public)
 }
 
 pub fn core_id_from_name(
@@ -118,12 +116,8 @@ pub fn core_id_from_name(
     namespace: &Namespace,
     name: &str,
 ) -> Result<String> {
-    let keys = key_pair_from_name(primary_key, namespace, name)?;
-    Ok({
-        let kp: &PartialKeypair = &keys;
-        let dk = discovery_key(&kp.public.to_bytes());
-        data_encoding::HEXLOWER.encode(&dk)
-    })
+    Ok(data_encoding::HEXLOWER
+        .encode(verifying_key_from_name(primary_key, namespace, name)?.as_bytes()))
 }
 
 #[test]

@@ -68,7 +68,7 @@ const NS: [u8; 32] = [
     235, 236, 237, 3, 21, 23, 67, 39, 13, 239, 41,
 ];
 
-pub unsafe fn derive_seed(
+unsafe fn derive_seed(
     primary_key: PrimaryKey,
     namespace: &Namespace,
     name: &str,
@@ -118,13 +118,6 @@ pub fn key_pair_from_name(
         public: verifying_key,
         secret: Some(signing_key),
     })
-}
-pub fn verifying_key_from_name(
-    primary_key: PrimaryKey,
-    namespace: &Namespace,
-    name: &str,
-) -> Result<VerifyingKey> {
-    Ok(key_pair_from_name(primary_key, namespace, name)?.public)
 }
 
 #[test]

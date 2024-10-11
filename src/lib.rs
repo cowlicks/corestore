@@ -4,14 +4,14 @@
 //! library](https://github.com/holepunchto/corestore).
 #![warn(
     missing_debug_implementations,
-    //missing_docs,
+    missing_docs,
     redundant_lifetimes,
     non_local_definitions,
     //unsafe_code,
     non_local_definitions
 )]
 
-pub mod keys;
+mod keys;
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
@@ -36,6 +36,7 @@ type Namespace = [u8; 32];
 /// Corestore's Errors
 #[non_exhaustive]
 #[derive(thiserror::Error, Debug)]
+#[allow(missing_docs)]
 pub enum Error {
     #[error("error from hypercore: {0}")]
     Hypercore(#[from] HypercoreError),
@@ -67,25 +68,30 @@ fn generate_primary_key() -> PrimaryKey {
 }
 
 #[derive(Debug)]
+/// The kind of [`Storage`] backing the [`Corestore`]
 pub enum StorageKind {
+    /// Use RAM
     Mem,
+    /// Use the disk at the provided path
     Disk(PathBuf),
 }
 
 impl StorageKind {
+    /// New [`StorageKind`] using disk at the provided `prefix`
     pub fn new_disk(prefix: impl AsRef<Path>) -> Self {
         Self::Disk(prefix.as_ref().to_path_buf())
     }
 
+    /// New [`StorageKind`] using RAM
     pub fn new_mem() -> Self {
         StorageKind::Mem
     }
 
     /// Gets or create a core.
-    /// The core is writable if `kp.secret.is_some()`.
+    /// The core is writable if the provide `PartialKeypair.secret.is_some()`.
     /// NB: A core should be controlled by only **one** store. This is insured by [`Corestore`]
     /// acceses this. Maybe we should also add a lock file.
-    pub async fn get_core_from_key_pair(&self, kp: PartialKeypair) -> Result<SharedCore> {
+    async fn get_core_from_key_pair(&self, kp: PartialKeypair) -> Result<SharedCore> {
         match self {
             StorageKind::Mem => {
                 let s = Storage::new_memory().await?;
@@ -146,14 +152,20 @@ fn get_storage_root<T: Into<StorageId>>(to_id: T) -> PathBuf {
 
 #[derive(Debug, derive_builder::Builder)]
 #[builder(pattern = "owned", build_fn(skip), derive(Debug))]
+/// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
 pub struct Corestore {
+    /// The [`PrimaryKey`] used to deterministically derive keys for cores owned by this
+    /// `Corestore`
     primary_key: PrimaryKey,
+    /// The kind of storage that [`Corestore`] will use to store it's data.
     storage: StorageKind,
     #[builder(default = "Default::default()")]
+    /// The place we keep active cores
     core_cache: CoreCache,
 }
 
 impl CorestoreBuilder {
+    /// Build the [`Corestore`]
     pub fn build(self) -> std::result::Result<Corestore, Error> {
         let Some(storage) = self.storage else {
             return Err(CorestoreBuilderError::UninitializedField("storage").into());
@@ -204,6 +216,8 @@ impl Corestore {
         Ok(core)
     }
 
+    /// Get a core from it's [`VerifyingKey`].
+    /// Since the core only has a verifyin key (and no [`SigningKey`]). It is rad-only.
     pub async fn get_from_verifying_key(
         &mut self,
         verifying_key: &VerifyingKey,

@@ -43,6 +43,15 @@
  * ```
  * PrimaryKey (+ name) -> SigningKey -> VerifyingKey & PartialKeypair -> DiscoveryKey
  *
+ * TODO we need some methods to make handling keys easier. Probably something like:
+ * fn (PrimaryKey, name: &str) -> SigningKey
+ * impl Frome<PartialKeypair> for DiscoveryKey
+ * impl Frome<SigningKey> for PartialKeypair
+ * impl Frome<SigningKey> for VerifyingKey
+ * impl Frome<VerifyingKey> for DiscoveryKey
+ *
+ * Some of these are redundant so implementing all is probably the wrong thing.
+ *
 */
 use crate::{Error, Namespace, PrimaryKey, Result};
 use hypercore::{PartialKeypair, SigningKey, VerifyingKey};

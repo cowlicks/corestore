@@ -6,10 +6,10 @@ Just like [corestore](https://github.com/holepunchto/corestore) but for for Rust
 
 - [x] persisted get/set by key for disk
 - [x] get/set for ram
-- [ ] match JS disk output
-- [ ] get/set by name for disk
+- [x] match JS disk output
+- [x] get/set by name for disk
 - [ ] replication
-- [ ] namespacing
+- [ ] [namespacing](https://github.com/holepunchto/corestore/tree/main?tab=readme-ov-file#const-store--storenamespacename)
 
 # Usage
 

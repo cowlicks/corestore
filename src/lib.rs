@@ -1,4 +1,3 @@
-//!
 //! [`Corestore`] provides a way to manage a related group of [`Hypercore`]s.
 //! Intended to be fully compatible with the [JavaScrpt `corestore`
 //! library](https://github.com/holepunchto/corestore).
@@ -13,6 +12,7 @@
 
 mod keys;
 use futures_lite::{AsyncRead, AsyncWrite};
+use hypercore_protocol::discovery_key;
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
@@ -22,8 +22,8 @@ use std::{
 };
 
 use hypercore::{
-    replication::{CoreMethodsError, SharedCore},
-    HypercoreBuilder, HypercoreError, PartialKeypair, Storage, VerifyingKey,
+    replication::CoreMethodsError, HypercoreBuilder, HypercoreError, PartialKeypair, Storage,
+    VerifyingKey,
 };
 
 use replicator::ReplicatingCore;
@@ -134,13 +134,14 @@ struct StorageId(String);
 
 impl From<&VerifyingKey> for StorageId {
     fn from(value: &VerifyingKey) -> Self {
-        StorageId(data_encoding::HEXLOWER.encode(value.as_bytes()))
+        let dk = discovery_key(value.as_bytes());
+        StorageId(data_encoding::HEXLOWER.encode(&dk))
     }
 }
 
 impl From<&PartialKeypair> for StorageId {
     fn from(value: &PartialKeypair) -> Self {
-        StorageId(data_encoding::HEXLOWER.encode(&value.public.to_bytes()))
+        (&value.public).into()
     }
 }
 fn get_storage_root<T: Into<StorageId>>(to_id: T) -> PathBuf {
@@ -222,7 +223,7 @@ impl Corestore {
     }
 
     /// Get a core from it's [`VerifyingKey`].
-    /// Since the core only has a verifyin key (and no [`SigningKey`]). It is rad-only.
+    /// Since the core only has a verifyin key (and no [`SigningKey`]). It is read-only.
     pub async fn get_from_verifying_key(
         &mut self,
         verifying_key: &VerifyingKey,
@@ -237,6 +238,15 @@ impl Corestore {
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
         Ok(Some(core))
+    }
+
+    ///
+    pub async fn replicate<S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static>(
+        &mut self,
+        _stream: S,
+        _is_initiator: bool,
+    ) {
+        todo!()
     }
 }
 

@@ -12,21 +12,24 @@
 
 mod keys;
 use futures_lite::{AsyncRead, AsyncWrite};
-use hypercore_protocol::discovery_key;
+use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     collections::HashMap,
     fs::write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tokio::sync::RwLock;
+use tracing::{debug, error, warn};
 
 use hypercore::{
     replication::CoreMethodsError, HypercoreBuilder, HypercoreError, PartialKeypair, Storage,
     VerifyingKey,
 };
 
-use replicator::ReplicatingCore;
+use replicator::{on_peer, ProtoMethods, ReplicatingCore, ReplicatorError};
 
 const CORES_DIR_NAME: &str = "cores";
 const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
@@ -41,6 +44,8 @@ type Namespace = [u8; 32];
 pub enum Error {
     #[error("error from hypercore: {0}")]
     Hypercore(#[from] HypercoreError),
+    #[error("error from ReplicatingCore: {0}")]
+    ReplicatingCore(#[from] ReplicatorError),
     #[error("error from hypercore CoreMethods: {0}")]
     CoreMethods(#[from] CoreMethodsError),
     #[error("Signature error")]
@@ -127,6 +132,16 @@ impl CoreCache {
 
     fn get(&self, verifying_key: &VerifyingKey) -> Option<ReplicatingCore> {
         self.verifying_key_to_cores.get(verifying_key).cloned()
+    }
+
+    /// TODO make this O(1) by storing a dk -> vk map
+    fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey> {
+        for vk in self.verifying_key_to_cores.keys() {
+            if dk == &discovery_key(vk.as_bytes()) {
+                return Some(vk.clone());
+            }
+        }
+        None
     }
 }
 
@@ -227,9 +242,9 @@ impl Corestore {
     pub async fn get_from_verifying_key(
         &mut self,
         verifying_key: &VerifyingKey,
-    ) -> Result<Option<ReplicatingCore>> {
+    ) -> Result<ReplicatingCore> {
         if let Some(core) = self.core_cache.get(&verifying_key) {
-            return Ok(Some(core));
+            return Ok(core);
         };
         let kp = PartialKeypair {
             public: *verifying_key,
@@ -237,16 +252,63 @@ impl Corestore {
         };
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
-        Ok(Some(core))
+        Ok(core)
     }
 
     ///
     pub async fn replicate<S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static>(
         &mut self,
-        _stream: S,
-        _is_initiator: bool,
-    ) {
-        todo!()
+        stream: S,
+        is_initiator: bool,
+    ) -> Result<()> {
+        let protocol = ProtocolBuilder::new(is_initiator).connect(stream);
+        let protocol: Arc<RwLock<Box<dyn ProtoMethods>>> =
+            Arc::new(RwLock::new(Box::new(protocol)));
+        while let Some(Ok(event)) = {
+            // this block is just here to release the `.write()` lock
+            #[allow(clippy::let_and_return)]
+            let p = protocol.write().await._next().await;
+            p
+        } {
+            match event {
+                Event::Handshake(_m) => {
+                    // TODO associate a "name" with this stream and log it.
+                    debug!("Handshake complete. Session secured")
+                }
+                Event::DiscoveryKey(dk) => {
+                    if let Some(vk) = self.core_cache.verifying_key_from_discovery_key(&dk) {
+                        protocol.write().await.open(*vk.as_bytes()).await?;
+                    }
+                }
+                Event::Channel(channel) => {
+                    // this channel is only opened after protocol.open(..) verifies we have the
+                    // same pub key.. Correct?
+                    //
+                    // get the core associated with this channel's dk.
+                    let Some(vk) = self
+                        .core_cache
+                        .verifying_key_from_discovery_key(&channel.discovery_key())
+                    else {
+                        panic!(
+                            "We **should** have verified that we have a core with this &dk already"
+                        );
+                    };
+                    // get core replicating over the channel...
+                    let core = self.get_from_verifying_key(&vk).await?;
+                    // pass channel to peers to replicate
+                    let _ = core
+                        .add_peer2(
+                            core.core.clone(),
+                            protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
+                        )
+                        .await;
+                    on_peer(core.core.clone(), channel).await?;
+                }
+                Event::Close(_dkey) => {}
+                _ => todo!(),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -289,7 +351,7 @@ mod test {
         let core_path = storage_dir.path().join(get_storage_root(&vk));
         assert!(core_path.exists());
 
-        let hc2 = cs.get_from_verifying_key(&vk).await?.unwrap();
+        let hc2 = cs.get_from_verifying_key(&vk).await?;
         assert_eq!(hc2.get(0).await?, Some(b"hello".to_vec()));
         Ok(())
     }

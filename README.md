@@ -10,6 +10,7 @@ Just like [corestore](https://github.com/holepunchto/corestore) but for for Rust
 - [x] get/set by name for disk
 - [ ] replication
 - [ ] [namespacing](https://github.com/holepunchto/corestore/tree/main?tab=readme-ov-file#const-store--storenamespacename)
+- [ ] handle channel & protocol close correctly
 
 # Usage
 

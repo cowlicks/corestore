@@ -297,7 +297,7 @@ impl Corestore {
                     let core = self.get_from_verifying_key(&vk).await?;
                     // pass channel to peers to replicate
                     let _ = core
-                        .add_peer2(
+                        .add_peer(
                             core.core.clone(),
                             protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
                         )

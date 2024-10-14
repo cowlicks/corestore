@@ -1,5 +1,5 @@
 //!
-//! [`Corestore`] provides a way to manage a related group of [`SharedCore`]s.
+//! [`Corestore`] provides a way to manage a related group of [`Hypercore`]s.
 //! Intended to be fully compatible with the [JavaScrpt `corestore`
 //! library](https://github.com/holepunchto/corestore).
 #![warn(
@@ -12,6 +12,7 @@
 )]
 
 mod keys;
+use futures_lite::{AsyncRead, AsyncWrite};
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use rand::{rngs::OsRng, RngCore};
 use std::{
@@ -24,8 +25,8 @@ use hypercore::{
     replication::{CoreMethodsError, SharedCore},
     HypercoreBuilder, HypercoreError, PartialKeypair, Storage, VerifyingKey,
 };
-// TODO this is just a type alias. If it's all we need from hc proto, then we should drop hc proto
-// as a dependency
+
+use replicator::ReplicatingCore;
 
 const CORES_DIR_NAME: &str = "cores";
 const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
@@ -91,19 +92,19 @@ impl StorageKind {
     /// The core is writable if the provide `PartialKeypair.secret.is_some()`.
     /// NB: A core should be controlled by only **one** store. This is insured by [`Corestore`]
     /// acceses this. Maybe we should also add a lock file.
-    async fn get_core_from_key_pair(&self, kp: PartialKeypair) -> Result<SharedCore> {
+    async fn get_core_from_key_pair(&self, kp: PartialKeypair) -> Result<ReplicatingCore> {
         match self {
             StorageKind::Mem => {
                 let s = Storage::new_memory().await?;
                 let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
-                Ok(SharedCore::from(hc))
+                Ok(ReplicatingCore::from(hc))
             }
             StorageKind::Disk(path) => {
                 let path_to_storage = get_storage_root(&kp);
                 let full_path = path.join(path_to_storage);
                 let s = Storage::new_disk(&full_path, false).await?;
                 let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
-                Ok(SharedCore::from(hc))
+                Ok(ReplicatingCore::from(hc))
             }
         }
     }
@@ -111,16 +112,20 @@ impl StorageKind {
 
 #[derive(Debug, Default)]
 struct CoreCache {
-    verifying_key_to_cores: HashMap<VerifyingKey, SharedCore>,
+    verifying_key_to_cores: HashMap<VerifyingKey, ReplicatingCore>,
 }
 
 impl CoreCache {
     // get the dk from a name
-    fn insert(&mut self, verifying_key: &VerifyingKey, core: SharedCore) -> Option<SharedCore> {
+    fn insert(
+        &mut self,
+        verifying_key: &VerifyingKey,
+        core: ReplicatingCore,
+    ) -> Option<ReplicatingCore> {
         self.verifying_key_to_cores.insert(*verifying_key, core)
     }
 
-    fn get(&self, verifying_key: &VerifyingKey) -> Option<SharedCore> {
+    fn get(&self, verifying_key: &VerifyingKey) -> Option<ReplicatingCore> {
         self.verifying_key_to_cores.get(verifying_key).cloned()
     }
 }
@@ -205,7 +210,7 @@ impl Corestore {
     /// This does... not? work if there is no verifying key.
     /// Or, maybe, all cores get a primary key, but only writable cores use this?
     /// This would imply that a corestore instance could have mixed readable and writable keys...
-    pub async fn get_from_name(&mut self, name: &str) -> Result<SharedCore> {
+    pub async fn get_from_name(&mut self, name: &str) -> Result<ReplicatingCore> {
         let kp = key_pair_from_name(self.primary_key, &DEFAULT_NAMESPACE, name)?;
 
         if let Some(core) = self.core_cache.get(&kp.public) {
@@ -221,7 +226,7 @@ impl Corestore {
     pub async fn get_from_verifying_key(
         &mut self,
         verifying_key: &VerifyingKey,
-    ) -> Result<Option<SharedCore>> {
+    ) -> Result<Option<ReplicatingCore>> {
         if let Some(core) = self.core_cache.get(&verifying_key) {
             return Ok(Some(core));
         };

@@ -17,7 +17,7 @@ use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use std::{collections::HashMap, sync::Arc};
 use storage::StorageKind;
-use tokio::sync::RwLock;
+use tokio::{spawn, sync::RwLock};
 use tracing::{debug, error, warn};
 
 use hypercore::{
@@ -79,6 +79,9 @@ impl CoreCache {
         self.verifying_key_to_cores.insert(*verifying_key, core)
     }
 
+    fn verifying_keys(&self) -> Vec<&VerifyingKey> {
+        self.verifying_key_to_cores.keys().collect()
+    }
     fn get(&self, verifying_key: &VerifyingKey) -> Option<ReplicatingCore> {
         self.verifying_key_to_cores.get(verifying_key).cloned()
     }
@@ -123,7 +126,7 @@ impl CorestoreBuilder {
         };
         for existing_core in cs.storage.load_existing_cores().await? {
             let vk = existing_core.key_pair().await.public;
-            cs.add_core(vk, existing_core);
+            cs.insert_core_into_cache(vk, existing_core);
         }
         Ok(cs)
     }
@@ -139,8 +142,12 @@ impl Corestore {
             .expect("should always work")
     }
 
-    fn add_core(&mut self, vk: VerifyingKey, core: ReplicatingCore) {
-        self.core_cache.insert(&vk, core.clone());
+    fn insert_core_into_cache(
+        &mut self,
+        vk: VerifyingKey,
+        core: ReplicatingCore,
+    ) -> Option<ReplicatingCore> {
+        self.core_cache.insert(&vk, core.clone())
     }
 
     /// Get a hypercore by name. If the core does not exist, create it.
@@ -175,60 +182,129 @@ impl Corestore {
         self.core_cache.insert(&kp.public, core.clone());
         Ok(core)
     }
+}
+
+impl From<Corestore> for SharedCs {
+    fn from(value: Corestore) -> Self {
+        Self {
+            corestore: Arc::new(RwLock::new(value)),
+        }
+    }
+}
+
+/// Replace Corestore with this
+#[derive(Debug, Clone)]
+pub struct SharedCs {
+    ///  shared ref to corestore
+    corestore: Arc<RwLock<Corestore>>,
+}
+
+impl SharedCs {
+    /// Get a hypercore by name. If the core does not exist, create it.
+    pub async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore> {
+        self.corestore.write().await.get_from_name(name).await
+    }
+
+    /// Get a core from it's [`VerifyingKey`].
+    pub async fn get_from_verifying_key(
+        &self,
+        verifying_key: &VerifyingKey,
+    ) -> Result<ReplicatingCore> {
+        self.corestore
+            .write()
+            .await
+            .get_from_verifying_key(verifying_key)
+            .await
+    }
 
     /// Start replicating through the given stream
     pub async fn replicate<S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static>(
-        &mut self,
+        &self,
         stream: S,
         is_initiator: bool,
     ) -> Result<()> {
         let protocol = ProtocolBuilder::new(is_initiator).connect(stream);
         let protocol: Arc<RwLock<Box<dyn ProtoMethods>>> =
             Arc::new(RwLock::new(Box::new(protocol)));
-        while let Some(Ok(event)) = {
-            // this block is just here to release the `.write()` lock
-            #[allow(clippy::let_and_return)]
-            let p = protocol.write().await._next().await;
-            p
-        } {
-            match event {
-                Event::Handshake(_m) => {
-                    // TODO associate a "name" with this stream and log it.
-                    debug!("Handshake complete. Session secured")
-                }
-                Event::DiscoveryKey(dk) => {
-                    if let Some(vk) = self.core_cache.verifying_key_from_discovery_key(&dk) {
-                        protocol.write().await.open(*vk.as_bytes()).await?;
+
+        let cs = self.clone();
+        spawn(async move {
+            while let Some(Ok(event)) = {
+                // this block is just here to release the `.write()` lock
+                #[allow(clippy::let_and_return)]
+                let p = protocol.write().await._next().await;
+                p
+            } {
+                debug!("Protocol event: [{event:?}]");
+                match event {
+                    Event::Handshake(_m) => {
+                        // TODO associate a "name" with this stream and log it.
+                        if is_initiator {
+                            let vks: Vec<VerifyingKey> = cs
+                                .corestore
+                                .read()
+                                .await
+                                .core_cache
+                                .verifying_keys()
+                                .into_iter()
+                                .cloned()
+                                .collect();
+                            // TODO spawn this?
+                            for vk in vks {
+                                protocol.write().await.open(*vk.as_bytes()).await?;
+                            }
+                        }
+                        debug!("Handshake complete. Session secured")
                     }
-                }
-                Event::Channel(channel) => {
-                    // this channel is only opened after protocol.open(..) verifies we have the
-                    // same pub key.. Correct?
-                    //
-                    // get the core associated with this channel's dk.
-                    let Some(vk) = self
-                        .core_cache
-                        .verifying_key_from_discovery_key(&channel.discovery_key())
-                    else {
-                        panic!(
+                    Event::DiscoveryKey(dk) => {
+                        if let Some(vk) = cs
+                            .corestore
+                            .read()
+                            .await
+                            .core_cache
+                            .verifying_key_from_discovery_key(&dk)
+                        {
+                            protocol.write().await.open(*vk.as_bytes()).await?;
+                        }
+                    }
+                    Event::Channel(channel) => {
+                        // this channel is only opened after protocol.open(..) verifies we have the
+                        // same pub key.. Correct?
+                        //
+                        // get the core associated with this channel's dk.
+                        let Some(vk) = cs
+                            .corestore
+                            .read()
+                            .await
+                            .core_cache
+                            .verifying_key_from_discovery_key(&channel.discovery_key())
+                        else {
+                            panic!(
                             "We **should** have verified that we have a core with this &dk already"
                         );
-                    };
-                    // get core replicating over the channel...
-                    let core = self.get_from_verifying_key(&vk).await?;
-                    // pass channel to peers to replicate
-                    let _ = core
-                        .add_peer(
-                            core.core.clone(),
-                            protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
-                        )
-                        .await;
-                    on_peer(core.core.clone(), channel).await?;
+                        };
+                        // get core replicating over the channel...
+                        let core = cs
+                            .corestore
+                            .write()
+                            .await
+                            .get_from_verifying_key(&vk)
+                            .await?;
+                        // pass channel to peers to replicate
+                        let _ = core
+                            .add_peer(
+                                core.core.clone(),
+                                protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
+                            )
+                            .await;
+                        on_peer(core.core.clone(), channel).await?;
+                    }
+                    Event::Close(_dkey) => {}
+                    _ => todo!(),
                 }
-                Event::Close(_dkey) => {}
-                _ => todo!(),
             }
-        }
+            Ok::<(), Error>(())
+        });
         Ok(())
     }
 }
@@ -236,8 +312,12 @@ impl Corestore {
 #[cfg(test)]
 mod test {
 
+    use std::time::Duration;
+
     use hypercore::replication::{CoreInfo, CoreMethods};
     use replicator::utils::create_connected_streams;
+    use tokio::time::sleep;
+    use utils::log;
 
     use super::{storage::get_storage_root, *};
 
@@ -314,10 +394,12 @@ mod test {
     }
 
     #[tokio::test]
-    async fn replication() -> Result<()> {
-        let (mut cs_a, mut cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
+    async fn prexisting_cores_replicate() -> Result<()> {
+        let (cs_a, cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
         let (a, b) = create_connected_streams();
 
+        let cs_a: SharedCs = cs_a.into();
+        let cs_b: SharedCs = cs_b.into();
         let name = "foo";
         let core_a = cs_a.get_from_name(name).await?;
         let pk = core_a.key_pair().await.public.clone();
@@ -328,8 +410,12 @@ mod test {
 
         cs_a.replicate(a, false).await?;
         cs_b.replicate(b, true).await?;
-        // a creates a core by name: foo_core= a.get_name('foo');
-        // b gets a core with foo_core's pub_key
-        todo!()
+        loop {
+            if core_b.get(0).await?.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
     }
 }

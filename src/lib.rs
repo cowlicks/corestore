@@ -10,22 +10,21 @@
     non_local_definitions
 )]
 
+mod builder;
 mod keys;
 mod storage;
 use futures_lite::{AsyncRead, AsyncWrite};
 use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
-use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
 use std::{collections::HashMap, sync::Arc};
 use storage::StorageKind;
 use tokio::{spawn, sync::RwLock};
 use tracing::{debug, error, warn};
 
-use hypercore::{
-    replication::{CoreInfo, CoreMethodsError},
-    HypercoreError, PartialKeypair, VerifyingKey,
-};
+use hypercore::{replication::CoreMethodsError, HypercoreError, VerifyingKey};
 
 use replicator::{on_peer, ProtoMethods, ReplicatingCore, ReplicatorError};
+
+pub use builder::{CorestoreBuilder, CorestoreBuilderError};
 
 const CORES_DIR_NAME: &str = "cores";
 const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
@@ -97,95 +96,6 @@ impl CoreCache {
     }
 }
 
-mod builder {
-    use super::*;
-    #[derive(Debug, derive_builder::Builder)]
-    #[builder(
-        pattern = "owned",
-        build_fn(skip),
-        derive(Debug),
-        name = "CorestoreBuilder"
-    )]
-    /// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
-    pub struct InnerCorstore {
-        /// The [`PrimaryKey`] used to deterministically derive keys for cores owned by this
-        /// `Corestore`
-        primary_key: PrimaryKey,
-        /// The kind of storage that [`Corestore`] will use to store it's data.
-        storage: StorageKind,
-        #[builder(default = "Default::default()")]
-        /// The place we keep active cores
-        core_cache: CoreCache,
-    }
-
-    impl CorestoreBuilder {
-        /// Build the [`Corestore`]
-        pub async fn build(self) -> std::result::Result<Corestore, Error> {
-            let Some(storage) = self.storage else {
-                return Err(CorestoreBuilderError::UninitializedField("storage").into());
-            };
-            // Somewhat complicated primary key logic
-            let primary_key: PrimaryKey = storage.get_or_create_primary_key(&self.primary_key)?;
-            let mut cs = InnerCorstore {
-                primary_key,
-                storage,
-                core_cache: self.core_cache.unwrap_or_default(),
-            };
-            for existing_core in cs.storage.load_existing_cores().await? {
-                let vk = existing_core.key_pair().await.public;
-                cs.insert_core_into_cache(vk, existing_core);
-            }
-            Ok(Corestore {
-                corestore: Arc::new(RwLock::new(cs)),
-            })
-        }
-    }
-
-    impl InnerCorstore {
-        fn insert_core_into_cache(
-            &mut self,
-            vk: VerifyingKey,
-            core: ReplicatingCore,
-        ) -> Option<ReplicatingCore> {
-            self.core_cache.insert(&vk, core.clone())
-        }
-
-        /// Get a hypercore by name. If the core does not exist, create it.
-        /// This does... not? work if there is no verifying key.
-        /// Or, maybe, all cores get a primary key, but only writable cores use this?
-        /// This would imply that a corestore instance could have mixed readable and writable keys...
-        pub async fn get_from_name(&mut self, name: &str) -> Result<ReplicatingCore> {
-            let kp = key_pair_from_name(self.primary_key, &DEFAULT_NAMESPACE, name)?;
-
-            if let Some(core) = self.core_cache.get(&kp.public) {
-                return Ok(core);
-            };
-            let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
-            self.core_cache.insert(&kp.public, core.clone());
-            Ok(core)
-        }
-
-        /// Get a core from it's [`VerifyingKey`].
-        /// Since the core only has a verifyin key (and no [`SigningKey`]). It is read-only.
-        pub async fn get_from_verifying_key(
-            &mut self,
-            verifying_key: &VerifyingKey,
-        ) -> Result<ReplicatingCore> {
-            if let Some(core) = self.core_cache.get(&verifying_key) {
-                return Ok(core);
-            };
-            let kp = PartialKeypair {
-                public: *verifying_key,
-                secret: None,
-            };
-            let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
-            self.core_cache.insert(&kp.public, core.clone());
-            Ok(core)
-        }
-    }
-}
-pub use builder::{CorestoreBuilder, CorestoreBuilderError};
-
 /// Replace Corestore with this
 #[derive(Debug, Clone)]
 pub struct Corestore {
@@ -247,7 +157,6 @@ impl Corestore {
                                 .corestore
                                 .read()
                                 .await
-                                .core_cache
                                 .verifying_keys()
                                 .into_iter()
                                 .cloned()
@@ -264,7 +173,6 @@ impl Corestore {
                             .corestore
                             .read()
                             .await
-                            .core_cache
                             .verifying_key_from_discovery_key(&dk)
                         {
                             protocol.write().await.open(*vk.as_bytes()).await?;
@@ -279,7 +187,6 @@ impl Corestore {
                             .corestore
                             .read()
                             .await
-                            .core_cache
                             .verifying_key_from_discovery_key(&channel.discovery_key())
                         else {
                             panic!(
@@ -336,7 +243,7 @@ mod test {
         let mut pk = TEST_PK.clone();
         pk[0] = 0;
 
-        let mut cs = CorestoreBuilder::default()
+        let cs = CorestoreBuilder::default()
             .primary_key(pk)
             .storage(StorageKind::new_disk(storage_dir.path()))
             .build()
@@ -423,20 +330,31 @@ mod test {
         let (cs_a, cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
         let (a, b) = create_connected_streams();
 
-        let cs_a: Corestore = cs_a.into();
-        let cs_b: Corestore = cs_b.into();
+        utils::log();
+        cs_a.replicate(a, false).await?;
+        cs_b.replicate(b, true).await?;
+
+        sleep(Duration::from_millis(25)).await;
+
         let name = "foo";
         let core_a = cs_a.get_from_name(name).await?;
+        dbg!(core_a.append(b"hello").await?);
+
         let pk = core_a.key_pair().await.public.clone();
         let core_b = cs_b.get_from_verifying_key(&pk).await?;
 
-        core_a.append(b"hello").await?;
-        assert!(core_b.get(0).await?.is_none());
-
-        cs_a.replicate(a, false).await?;
-        cs_b.replicate(b, true).await?;
+        core_a.append(b"world").await?;
         loop {
-            if core_b.get(0).await?.is_some() {
+            if let Some(x) = core_b.get(0).await? {
+                assert_eq!(x, b"hello");
+                break;
+            }
+            dbg!();
+            sleep(Duration::from_millis(25)).await;
+        }
+        loop {
+            if let Some(x) = core_b.get(1).await? {
+                assert_eq!(x, b"world");
                 break;
             }
             sleep(Duration::from_millis(25)).await;

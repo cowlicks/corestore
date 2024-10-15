@@ -1,0 +1,103 @@
+use delegate::delegate;
+use hypercore_protocol::DiscoveryKey;
+use replicator::ReplicatingCore;
+use std::sync::Arc;
+
+use crate::{
+    keys::{key_pair_from_name, DEFAULT_NAMESPACE},
+    storage::StorageKind,
+    CoreCache, Corestore, Error, PrimaryKey, Result,
+};
+use hypercore::{replication::CoreInfo, PartialKeypair, VerifyingKey};
+use tokio::sync::RwLock;
+
+#[derive(Debug, derive_builder::Builder)]
+#[builder(
+    pattern = "owned",
+    build_fn(skip),
+    derive(Debug),
+    name = "CorestoreBuilder"
+)]
+/// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
+pub struct InnerCorstore {
+    /// The [`PrimaryKey`] used to deterministically derive keys for cores owned by this
+    /// `Corestore`
+    primary_key: PrimaryKey,
+    /// The kind of storage that [`Corestore`] will use to store it's data.
+    storage: StorageKind,
+    #[builder(default = "Default::default()")]
+    /// The place we keep active cores
+    core_cache: CoreCache,
+}
+
+impl CorestoreBuilder {
+    /// Build the [`Corestore`]
+    pub async fn build(self) -> std::result::Result<Corestore, Error> {
+        let Some(storage) = self.storage else {
+            return Err(CorestoreBuilderError::UninitializedField("storage").into());
+        };
+        // Somewhat complicated primary key logic
+        let primary_key: PrimaryKey = storage.get_or_create_primary_key(&self.primary_key)?;
+        let mut cs = InnerCorstore {
+            primary_key,
+            storage,
+            core_cache: self.core_cache.unwrap_or_default(),
+        };
+        for existing_core in cs.storage.load_existing_cores().await? {
+            let vk = existing_core.key_pair().await.public;
+            cs.insert_core_into_cache(vk, existing_core);
+        }
+        Ok(Corestore {
+            corestore: Arc::new(RwLock::new(cs)),
+        })
+    }
+}
+
+impl InnerCorstore {
+    delegate! {
+        to self.core_cache {
+            pub fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey>;
+            pub fn verifying_keys(&self) -> Vec<&VerifyingKey>;
+        }
+    }
+    fn insert_core_into_cache(
+        &mut self,
+        vk: VerifyingKey,
+        core: ReplicatingCore,
+    ) -> Option<ReplicatingCore> {
+        self.core_cache.insert(&vk, core.clone())
+    }
+
+    /// Get a hypercore by name. If the core does not exist, create it.
+    /// This does... not? work if there is no verifying key.
+    /// Or, maybe, all cores get a primary key, but only writable cores use this?
+    /// This would imply that a corestore instance could have mixed readable and writable keys...
+    pub async fn get_from_name(&mut self, name: &str) -> Result<ReplicatingCore> {
+        let kp = key_pair_from_name(self.primary_key, &DEFAULT_NAMESPACE, name)?;
+
+        if let Some(core) = self.core_cache.get(&kp.public) {
+            return Ok(core);
+        };
+        let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
+        self.core_cache.insert(&kp.public, core.clone());
+        Ok(core)
+    }
+
+    /// Get a core from it's [`VerifyingKey`].
+    /// Since the core only has a verifyin key (and no [`SigningKey`]). It is read-only.
+    pub async fn get_from_verifying_key(
+        &mut self,
+        verifying_key: &VerifyingKey,
+    ) -> Result<ReplicatingCore> {
+        if let Some(core) = self.core_cache.get(&verifying_key) {
+            return Ok(core);
+        };
+        let kp = PartialKeypair {
+            public: *verifying_key,
+            secret: None,
+        };
+        let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
+        self.core_cache.insert(&kp.public, core.clone());
+        Ok(core)
+    }
+}

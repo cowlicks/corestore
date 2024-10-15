@@ -11,22 +11,18 @@
 )]
 
 mod keys;
+mod storage;
 use futures_lite::{AsyncRead, AsyncWrite};
 use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
 use keys::{key_pair_from_name, DEFAULT_NAMESPACE};
-use rand::{rngs::OsRng, RngCore};
-use std::{
-    collections::HashMap,
-    fs::write,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
+use storage::StorageKind;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
 use hypercore::{
-    replication::CoreMethodsError, HypercoreBuilder, HypercoreError, PartialKeypair, Storage,
-    VerifyingKey,
+    replication::{CoreInfo, CoreMethodsError},
+    HypercoreError, PartialKeypair, VerifyingKey,
 };
 
 use replicator::{on_peer, ProtoMethods, ReplicatingCore, ReplicatorError};
@@ -62,58 +58,11 @@ pub enum Error {
     LibSodiumGenericHashError(i32),
     #[error("libsodium's sign_seed_keypair function did not return `0`. Got: {0}")]
     LibSodiumSignSeedKeypair(i32),
+    #[error("error reading dirs {0}")]
+    ReadDirError(std::io::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
-
-fn generate_primary_key() -> PrimaryKey {
-    let mut csprng = OsRng;
-    let mut primary_key = [0u8; 32];
-    csprng.fill_bytes(&mut primary_key);
-    primary_key
-}
-
-#[derive(Debug)]
-/// The kind of [`Storage`] backing the [`Corestore`]
-pub enum StorageKind {
-    /// Use RAM
-    Mem,
-    /// Use the disk at the provided path
-    Disk(PathBuf),
-}
-
-impl StorageKind {
-    /// New [`StorageKind`] using disk at the provided `prefix`
-    pub fn new_disk(prefix: impl AsRef<Path>) -> Self {
-        Self::Disk(prefix.as_ref().to_path_buf())
-    }
-
-    /// New [`StorageKind`] using RAM
-    pub fn new_mem() -> Self {
-        StorageKind::Mem
-    }
-
-    /// Gets or create a core.
-    /// The core is writable if the provide `PartialKeypair.secret.is_some()`.
-    /// NB: A core should be controlled by only **one** store. This is insured by [`Corestore`]
-    /// acceses this. Maybe we should also add a lock file.
-    async fn get_core_from_key_pair(&self, kp: PartialKeypair) -> Result<ReplicatingCore> {
-        match self {
-            StorageKind::Mem => {
-                let s = Storage::new_memory().await?;
-                let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
-                Ok(ReplicatingCore::from(hc))
-            }
-            StorageKind::Disk(path) => {
-                let path_to_storage = get_storage_root(&kp);
-                let full_path = path.join(path_to_storage);
-                let s = Storage::new_disk(&full_path, false).await?;
-                let hc = HypercoreBuilder::new(s).key_pair(kp).build().await?;
-                Ok(ReplicatingCore::from(hc))
-            }
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 struct CoreCache {
@@ -145,32 +94,6 @@ impl CoreCache {
     }
 }
 
-struct StorageId(String);
-
-impl From<&VerifyingKey> for StorageId {
-    fn from(value: &VerifyingKey) -> Self {
-        let dk = discovery_key(value.as_bytes());
-        StorageId(data_encoding::HEXLOWER.encode(&dk))
-    }
-}
-
-impl From<&PartialKeypair> for StorageId {
-    fn from(value: &PartialKeypair) -> Self {
-        (&value.public).into()
-    }
-}
-fn get_storage_root<T: Into<StorageId>>(to_id: T) -> PathBuf {
-    let id: StorageId = to_id.into();
-
-    format!(
-        "{CORES_DIR_NAME}/{}/{}/{}",
-        id.0[0..2].to_string(),
-        id.0[2..4].to_string(),
-        id.0
-    )
-    .into()
-}
-
 #[derive(Debug, derive_builder::Builder)]
 #[builder(pattern = "owned", build_fn(skip), derive(Debug))]
 /// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
@@ -187,41 +110,39 @@ pub struct Corestore {
 
 impl CorestoreBuilder {
     /// Build the [`Corestore`]
-    pub fn build(self) -> std::result::Result<Corestore, Error> {
+    pub async fn build(self) -> std::result::Result<Corestore, Error> {
         let Some(storage) = self.storage else {
             return Err(CorestoreBuilderError::UninitializedField("storage").into());
         };
         // Somewhat complicated primary key logic
-        let primary_key: PrimaryKey = match storage {
-            StorageKind::Mem => generate_primary_key(),
-            StorageKind::Disk(ref path) => {
-                let pk_path = path.join(PRIMARY_KEY_FILE_NAME);
-                // key file exists on disk
-                if pk_path.exists() {
-                    if self.primary_key.is_some() {
-                        return Err(Error::PrimaryKeyConflict(pk_path.display().to_string()));
-                    }
-                    std::fs::read(pk_path)?
-                        .try_into()
-                        // Fail if key on disk is invalid
-                        .map_err(|_| Error::InvalidPrimaryKey)?
-                } else {
-                    // No existing key on disk, create one
-                    let pk = generate_primary_key();
-                    write(pk_path, &pk)?;
-                    pk
-                }
-            }
-        };
-        Ok(Corestore {
+        let primary_key: PrimaryKey = storage.get_or_create_primary_key(&self.primary_key)?;
+        let mut cs = Corestore {
             primary_key,
             storage,
             core_cache: self.core_cache.unwrap_or_default(),
-        })
+        };
+        for existing_core in cs.storage.load_existing_cores().await? {
+            let vk = existing_core.key_pair().await.public;
+            cs.add_core(vk, existing_core);
+        }
+        Ok(cs)
     }
 }
 
 impl Corestore {
+    /// Create a new [`Corestore`] that stores it data in RAM
+    pub async fn new_mem() -> Self {
+        CorestoreBuilder::default()
+            .storage(StorageKind::new_mem())
+            .build()
+            .await
+            .expect("should always work")
+    }
+
+    fn add_core(&mut self, vk: VerifyingKey, core: ReplicatingCore) {
+        self.core_cache.insert(&vk, core.clone());
+    }
+
     /// Get a hypercore by name. If the core does not exist, create it.
     /// This does... not? work if there is no verifying key.
     /// Or, maybe, all cores get a primary key, but only writable cores use this?
@@ -255,7 +176,7 @@ impl Corestore {
         Ok(core)
     }
 
-    ///
+    /// Start replicating through the given stream
     pub async fn replicate<S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static>(
         &mut self,
         stream: S,
@@ -316,19 +237,14 @@ impl Corestore {
 mod test {
 
     use hypercore::replication::{CoreInfo, CoreMethods};
+    use replicator::utils::create_connected_streams;
 
-    use super::*;
+    use super::{storage::get_storage_root, *};
 
     const TEST_PK: PrimaryKey = [
         124, 229, 174, 223, 232, 201, 160, 10, 235, 143, 37, 249, 107, 92, 35, 125, 68, 246, 2,
         197, 41, 248, 234, 65, 9, 222, 77, 144, 50, 243, 222, 65,
     ];
-
-    #[test]
-    fn get_storage_dir_matches_js() {
-        let id = StorageId("helloworld".to_string());
-        assert_eq!(get_storage_root(id).as_os_str(), "cores/he/ll/helloworld");
-    }
 
     #[tokio::test]
     async fn disk_core_by_name() -> Result<()> {
@@ -341,7 +257,8 @@ mod test {
         let mut cs = CorestoreBuilder::default()
             .primary_key(pk)
             .storage(StorageKind::new_disk(storage_dir.path()))
-            .build()?;
+            .build()
+            .await?;
 
         let hc = cs.get_from_name("foo").await?;
         hc.append(b"hello").await?;
@@ -366,7 +283,8 @@ mod test {
             let mut cs = CorestoreBuilder::default()
                 .primary_key(pk)
                 .storage(StorageKind::new_disk(storage_dir.path()))
-                .build()?;
+                .build()
+                .await?;
 
             let hc = cs.get_from_name("foo").await?;
             hc.append(b"hello").await?;
@@ -375,7 +293,8 @@ mod test {
             // corestore uses pk in directory if it exists already
             let mut cs = CorestoreBuilder::default()
                 .storage(StorageKind::new_disk(storage_dir.path()))
-                .build()?;
+                .build()
+                .await?;
             let hc = cs.get_from_name("foo").await?;
             assert_eq!(hc.get(0).await?, Some(b"hello".to_vec()));
         }
@@ -385,11 +304,32 @@ mod test {
                 CorestoreBuilder::default()
                     .storage(StorageKind::new_disk(storage_dir.path()))
                     .primary_key(pk)
-                    .build(),
+                    .build()
+                    .await,
                 Err(Error::PrimaryKeyConflict(_))
             ));
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn replication() -> Result<()> {
+        let (mut cs_a, mut cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
+        let (a, b) = create_connected_streams();
+
+        let name = "foo";
+        let core_a = cs_a.get_from_name(name).await?;
+        let pk = core_a.key_pair().await.public.clone();
+        let core_b = cs_b.get_from_verifying_key(&pk).await?;
+
+        core_a.append(b"hello").await?;
+        assert!(core_b.get(0).await?.is_none());
+
+        cs_a.replicate(a, false).await?;
+        cs_b.replicate(b, true).await?;
+        // a creates a core by name: foo_core= a.get_name('foo');
+        // b gets a core with foo_core's pub_key
+        todo!()
     }
 }

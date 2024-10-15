@@ -17,6 +17,7 @@ rand = "0.8.5"
 derive_builder = "0.20.2"
 futures-lite = "2.3.0"
 replicator = { path = "../replicator/replicator" }
+delegate = "0.13.1"
 
 
 [dependencies.hypercore]

@@ -98,9 +98,14 @@ impl CoreCache {
 }
 
 #[derive(Debug, derive_builder::Builder)]
-#[builder(pattern = "owned", build_fn(skip), derive(Debug))]
+#[builder(
+    pattern = "owned",
+    build_fn(skip),
+    derive(Debug),
+    name = "CorestoreBuilder"
+)]
 /// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
-pub struct Corestore {
+pub struct InnerCorstore {
     /// The [`PrimaryKey`] used to deterministically derive keys for cores owned by this
     /// `Corestore`
     primary_key: PrimaryKey,
@@ -119,7 +124,7 @@ impl CorestoreBuilder {
         };
         // Somewhat complicated primary key logic
         let primary_key: PrimaryKey = storage.get_or_create_primary_key(&self.primary_key)?;
-        let mut cs = Corestore {
+        let mut cs = InnerCorstore {
             primary_key,
             storage,
             core_cache: self.core_cache.unwrap_or_default(),
@@ -128,20 +133,13 @@ impl CorestoreBuilder {
             let vk = existing_core.key_pair().await.public;
             cs.insert_core_into_cache(vk, existing_core);
         }
-        Ok(cs)
+        Ok(Corestore {
+            corestore: Arc::new(RwLock::new(cs)),
+        })
     }
 }
 
-impl Corestore {
-    /// Create a new [`Corestore`] that stores it data in RAM
-    pub async fn new_mem() -> Self {
-        CorestoreBuilder::default()
-            .storage(StorageKind::new_mem())
-            .build()
-            .await
-            .expect("should always work")
-    }
-
+impl InnerCorstore {
     fn insert_core_into_cache(
         &mut self,
         vk: VerifyingKey,
@@ -184,8 +182,8 @@ impl Corestore {
     }
 }
 
-impl From<Corestore> for SharedCs {
-    fn from(value: Corestore) -> Self {
+impl From<InnerCorstore> for Corestore {
+    fn from(value: InnerCorstore) -> Self {
         Self {
             corestore: Arc::new(RwLock::new(value)),
         }
@@ -194,12 +192,21 @@ impl From<Corestore> for SharedCs {
 
 /// Replace Corestore with this
 #[derive(Debug, Clone)]
-pub struct SharedCs {
+pub struct Corestore {
     ///  shared ref to corestore
-    corestore: Arc<RwLock<Corestore>>,
+    corestore: Arc<RwLock<InnerCorstore>>,
 }
 
-impl SharedCs {
+impl Corestore {
+    /// Create a new [`Corestore`] that stores it data in RAM
+    pub async fn new_mem() -> Corestore {
+        CorestoreBuilder::default()
+            .storage(StorageKind::new_mem())
+            .build()
+            .await
+            .expect("should always work")
+    }
+
     /// Get a hypercore by name. If the core does not exist, create it.
     pub async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore> {
         self.corestore.write().await.get_from_name(name).await
@@ -317,7 +324,6 @@ mod test {
     use hypercore::replication::{CoreInfo, CoreMethods};
     use replicator::utils::create_connected_streams;
     use tokio::time::sleep;
-    use utils::log;
 
     use super::{storage::get_storage_root, *};
 
@@ -360,7 +366,7 @@ mod test {
         pk[0] = 1;
 
         {
-            let mut cs = CorestoreBuilder::default()
+            let cs = CorestoreBuilder::default()
                 .primary_key(pk)
                 .storage(StorageKind::new_disk(storage_dir.path()))
                 .build()
@@ -371,7 +377,7 @@ mod test {
         }
         {
             // corestore uses pk in directory if it exists already
-            let mut cs = CorestoreBuilder::default()
+            let cs = CorestoreBuilder::default()
                 .storage(StorageKind::new_disk(storage_dir.path()))
                 .build()
                 .await?;
@@ -398,8 +404,8 @@ mod test {
         let (cs_a, cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
         let (a, b) = create_connected_streams();
 
-        let cs_a: SharedCs = cs_a.into();
-        let cs_b: SharedCs = cs_b.into();
+        let cs_a: Corestore = cs_a.into();
+        let cs_b: Corestore = cs_b.into();
         let name = "foo";
         let core_a = cs_a.get_from_name(name).await?;
         let pk = core_a.key_pair().await.public.clone();

@@ -19,10 +19,10 @@ use tokio::sync::{broadcast::Receiver, RwLock};
     derive(Debug),
     name = "CorestoreBuilder"
 )]
-/// [`Corestore`] is used to manage a collection of related [`Hypercore`]s.
+/// This holds all of [`Corestore`]s data. It gets wrappped with `Arc<Mutex<..>>` to make `Corestore` `Send` & `Sync`.
 pub struct InnerCorstore {
     /// The [`PrimaryKey`] used to deterministically derive keys for cores owned by this
-    /// `Corestore`
+    /// [`Corestore`]
     primary_key: PrimaryKey,
     /// The kind of storage that [`Corestore`] will use to store it's data.
     storage: StorageKind,

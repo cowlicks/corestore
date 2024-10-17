@@ -1,4 +1,4 @@
-//! [`Corestore`] provides a way to manage a related group of [`Hypercore`]s.
+//! [`Corestore`] provides a way to manage a related group of [`hypercore::Hypercore`]s.
 //! Intended to be fully compatible with the [JavaScrpt `corestore`
 //! library](https://github.com/holepunchto/corestore).
 #![warn(
@@ -34,8 +34,10 @@ static MAX_EVENT_QUEUE_CAPACITY: usize = 32;
 const CORES_DIR_NAME: &str = "cores";
 const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
 
-type PrimaryKey = [u8; 32];
-type Namespace = [u8; 32];
+/// The key [`Corestore`] uses for deriving keys for it's [`hypercore::Hypercore`]s.
+pub type PrimaryKey = [u8; 32];
+/// Used to prefix names of names of [`hypercore::Hypercore`] to create namespaces
+pub type Namespace = [u8; 32];
 
 /// Corestore's Errors
 #[non_exhaustive]
@@ -149,7 +151,8 @@ impl CoreCache {
     }
 }
 
-/// Replace Corestore with this
+/// Container for managing groups of related [`hypercore::Hypercore`]s. It should match the behavior of the
+/// [JavaScript version](https://github.com/holepunchto/corestore?tab=readme-ov-file#api).
 #[derive(Debug, Clone)]
 pub struct Corestore {
     ///  shared ref to corestore

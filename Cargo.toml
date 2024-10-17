@@ -21,8 +21,16 @@ delegate = "0.13.1"
 
 
 [dependencies.hypercore]
-git = "https://github.com/cowlicks/hypercore.git"
-branch = "replication"
+path = "../core"
+#git = "https://github.com/cowlicks/hypercore.git"
+#branch = "replication"
+default-features = false
+features = ["sparse", "tokio"]
+
+[dependencies.hypercore-protocol]
+path = "../protocol"
+#git = "https://github.com/cowlicks/hypercore.git"
+#branch = "replication"
 default-features = false
 features = ["sparse", "tokio"]
 

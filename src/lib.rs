@@ -161,13 +161,14 @@ impl Corestore {
     delegate! {
         to self.corestore.read().await {
             #[await(false)]
-            async fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey>;
+            /// Get the [`VerifyingKey`] key that corresponds to a [`DiscoveryKey`]
+            pub async fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey>;
         }
         to self.corestore.write().await {
             /// Get a core from it's [`VerifyingKey`].
-            async fn get_from_verifying_key(&self, vk: &VerifyingKey) -> Result<ReplicatingCore>;
+            pub async fn get_from_verifying_key(&self, vk: &VerifyingKey) -> Result<ReplicatingCore>;
             /// Get a hypercore by name. If the core does not exist, create it.
-            async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore>;
+            pub async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore>;
         }
     }
     /// Create a new [`Corestore`] that stores it data in RAM

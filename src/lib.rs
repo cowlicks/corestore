@@ -15,9 +15,13 @@ mod keys;
 mod storage;
 use futures_lite::{AsyncRead, AsyncWrite};
 use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use storage::StorageKind;
-use tokio::{spawn, sync::RwLock};
+use tokio::{
+    spawn,
+    sync::RwLock,
+    time::{sleep, timeout},
+};
 use tracing::{debug, error, warn};
 
 use hypercore::{replication::CoreMethodsError, HypercoreError, VerifyingKey};
@@ -26,6 +30,7 @@ use replicator::{on_peer, ProtoMethods, ReplicatingCore, ReplicatorError};
 
 pub use builder::{CorestoreBuilder, CorestoreBuilderError};
 
+static MAX_EVENT_QUEUE_CAPACITY: usize = 32;
 const CORES_DIR_NAME: &str = "cores";
 const PRIMARY_KEY_FILE_NAME: &str = "primary-key";
 
@@ -62,6 +67,54 @@ pub enum Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+mod events {
+    #![allow(unused)]
+
+    use super::{Result, MAX_EVENT_QUEUE_CAPACITY};
+    use hypercore::VerifyingKey;
+    use hypercore_protocol::DiscoveryKey;
+    use tokio::sync::{broadcast, BarrierWaitResult};
+
+    #[derive(Debug, Clone)]
+    /// Coresstore events
+    pub enum Event {
+        /// A new core was added
+        CoreAdded(VerifyingKey),
+        /// Corestore is shutting down
+        Shutdown,
+    }
+
+    #[derive(Debug)]
+    /// Event bus for Corestore
+    pub struct Events {
+        channel: broadcast::Sender<Event>,
+    }
+
+    impl Events {
+        fn new() -> Self {
+            Self {
+                channel: broadcast::channel(MAX_EVENT_QUEUE_CAPACITY).0,
+            }
+        }
+
+        pub fn send(&self, evt: Event) -> Result<()> {
+            let _ = self.channel.send(evt);
+            Ok(())
+        }
+
+        pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+            self.channel.subscribe()
+        }
+    }
+    impl Default for Events {
+        fn default() -> Self {
+            Events::new()
+        }
+    }
+}
+
+pub use events::Event as CorestoreEvents;
 
 #[derive(Debug, Default)]
 struct CoreCache {
@@ -136,81 +189,110 @@ impl Corestore {
         stream: S,
         is_initiator: bool,
     ) -> Result<()> {
+        let mut rx = self.corestore.read().await.subscribe();
         let protocol = ProtocolBuilder::new(is_initiator).connect(stream);
         let protocol: Arc<RwLock<Box<dyn ProtoMethods>>> =
             Arc::new(RwLock::new(Box::new(protocol)));
 
         let cs = self.clone();
+        let events_protocol = protocol.clone();
         spawn(async move {
-            while let Some(Ok(event)) = {
-                // this block is just here to release the `.write()` lock
-                #[allow(clippy::let_and_return)]
-                let p = protocol.write().await._next().await;
-                p
-            } {
-                debug!("Protocol event: [{event:?}]");
-                match event {
-                    Event::Handshake(_m) => {
-                        // TODO associate a "name" with this stream and log it.
+            use CorestoreEvents::*;
+            // TODO i think this is only needed in the protocol read loop
+            loop {
+                match timeout(Duration::from_millis(250), rx.recv()).await {
+                    Err(_timed_out) => {
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                    Ok(Ok(CoreAdded(verifying_key))) => {
                         if is_initiator {
-                            let vks: Vec<VerifyingKey> = cs
+                            events_protocol
+                                .write()
+                                .await
+                                .open(*verifying_key.as_bytes())
+                                .await?;
+                        }
+                    }
+                    Ok(Ok(Shutdown)) => return Ok::<(), Error>(()),
+                    Ok(_) => continue,
+                }
+            }
+        });
+        spawn(async move {
+            loop {
+                let event_fut = async {
+                    let mut proto = protocol.write().await;
+                    let p = proto._next().await;
+                    p
+                };
+                if let Ok(Some(Ok(event))) = timeout(Duration::from_millis(500), event_fut).await {
+                    debug!("RX Protocol event: [{event:?}]");
+                    match event {
+                        Event::Handshake(_m) => {
+                            // TODO associate a "name" with this stream and log it.
+                            if is_initiator {
+                                // TODO these methods YUK!
+                                let vks: Vec<VerifyingKey> = cs
+                                    .corestore
+                                    .read()
+                                    .await
+                                    .verifying_keys()
+                                    .into_iter()
+                                    .cloned()
+                                    .collect();
+                                // TODO spawn this?
+                                for vk in vks {
+                                    protocol.write().await.open(*vk.as_bytes()).await?;
+                                }
+                            }
+                            debug!("Handshake complete. Session secured")
+                        }
+                        Event::DiscoveryKey(dk) => {
+                            if let Some(vk) = cs
                                 .corestore
                                 .read()
                                 .await
-                                .verifying_keys()
-                                .into_iter()
-                                .cloned()
-                                .collect();
-                            // TODO spawn this?
-                            for vk in vks {
+                                .verifying_key_from_discovery_key(&dk)
+                            {
                                 protocol.write().await.open(*vk.as_bytes()).await?;
                             }
                         }
-                        debug!("Handshake complete. Session secured")
-                    }
-                    Event::DiscoveryKey(dk) => {
-                        if let Some(vk) = cs
-                            .corestore
-                            .read()
-                            .await
-                            .verifying_key_from_discovery_key(&dk)
-                        {
-                            protocol.write().await.open(*vk.as_bytes()).await?;
-                        }
-                    }
-                    Event::Channel(channel) => {
-                        // this channel is only opened after protocol.open(..) verifies we have the
-                        // same pub key.. Correct?
-                        //
-                        // get the core associated with this channel's dk.
-                        let Some(vk) = cs
-                            .corestore
-                            .read()
-                            .await
-                            .verifying_key_from_discovery_key(&channel.discovery_key())
-                        else {
-                            panic!(
+                        Event::Channel(channel) => {
+                            // this channel is only opened after protocol.open(..) verifies we have the
+                            // same pub key.. Correct?
+                            //
+                            // get the core associated with this channel's dk.
+                            let Some(vk) = cs
+                                .corestore
+                                .read()
+                                .await
+                                .verifying_key_from_discovery_key(&channel.discovery_key())
+                            else {
+                                panic!(
                             "We **should** have verified that we have a core with this &dk already"
                         );
-                        };
-                        // get core replicating over the channel...
-                        let core = cs
-                            .corestore
-                            .write()
-                            .await
-                            .get_from_verifying_key(&vk)
-                            .await?;
-                        // pass channel to peers to replicate
-                        let _ = core
-                            .add_peer(
-                                core.core.clone(),
-                                protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
-                            )
-                            .await;
-                        on_peer(core.core.clone(), channel).await?;
+                            };
+                            // get core replicating over the channel...
+                            let core = cs
+                                .corestore
+                                .write()
+                                .await
+                                .get_from_verifying_key(&vk)
+                                .await?;
+                            // pass channel to peers to replicate
+                            let _ = core
+                                .add_peer(
+                                    core.core.clone(),
+                                    protocol.clone() as Arc<RwLock<Box<dyn ProtoMethods>>>,
+                                )
+                                .await;
+                            on_peer(core.core.clone(), channel).await?;
+                        }
+                        Event::Close(_dkey) => {}
+                        _ => break,
                     }
-                    Event::Close(_dkey) => {}
-                    _ => todo!(),
+                } else {
+                    sleep(Duration::from_millis(250)).await;
                 }
             }
             Ok::<(), Error>(())
@@ -325,6 +407,8 @@ mod test {
         Ok(())
     }
 
+    // TODO NEXT I need to add a way for CorestoreInner  to emit an event whenever it gets a new
+    // Hypercore. Then have Corestore run Protocol.open(new_hypercore.public_key).
     #[tokio::test]
     async fn new_cores_replicate() -> Result<()> {
         let (cs_a, cs_b) = (Corestore::new_mem().await, Corestore::new_mem().await);
@@ -334,6 +418,7 @@ mod test {
         cs_a.replicate(a, false).await?;
         cs_b.replicate(b, true).await?;
 
+        // wait a bit so handshake completes
         sleep(Duration::from_millis(25)).await;
 
         let name = "foo";
@@ -350,7 +435,7 @@ mod test {
                 break;
             }
             dbg!();
-            sleep(Duration::from_millis(25)).await;
+            sleep(Duration::from_millis(500)).await;
         }
         loop {
             if let Some(x) = core_b.get(1).await? {

@@ -4,12 +4,13 @@ use replicator::ReplicatingCore;
 use std::sync::Arc;
 
 use crate::{
+    events::{Event, Events},
     keys::{key_pair_from_name, DEFAULT_NAMESPACE},
     storage::StorageKind,
     CoreCache, Corestore, Error, PrimaryKey, Result,
 };
 use hypercore::{replication::CoreInfo, PartialKeypair, VerifyingKey};
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast::Receiver, RwLock};
 
 #[derive(Debug, derive_builder::Builder)]
 #[builder(
@@ -28,6 +29,9 @@ pub struct InnerCorstore {
     #[builder(default = "Default::default()")]
     /// The place we keep active cores
     core_cache: CoreCache,
+    /// Emits store events for replication
+    #[builder(default = "Default::default()")]
+    events: Events,
 }
 
 impl CorestoreBuilder {
@@ -42,6 +46,7 @@ impl CorestoreBuilder {
             primary_key,
             storage,
             core_cache: self.core_cache.unwrap_or_default(),
+            events: Default::default(),
         };
         for existing_core in cs.storage.load_existing_cores().await? {
             let vk = existing_core.key_pair().await.public;
@@ -59,7 +64,11 @@ impl InnerCorstore {
             pub fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey>;
             pub fn verifying_keys(&self) -> Vec<&VerifyingKey>;
         }
+        to self.events {
+            pub fn subscribe(&self) -> Receiver<Event>;
+        }
     }
+
     fn insert_core_into_cache(
         &mut self,
         vk: VerifyingKey,
@@ -80,6 +89,7 @@ impl InnerCorstore {
         };
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
+        let _ = self.events.send(Event::CoreAdded(kp.public.clone()));
         Ok(core)
     }
 
@@ -98,6 +108,8 @@ impl InnerCorstore {
         };
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
+        // TODO dry this
+        let _ = self.events.send(Event::CoreAdded(kp.public.clone()));
         Ok(core)
     }
 }

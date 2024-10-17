@@ -140,7 +140,7 @@ fn check_derive_seed() -> Result<()> {
         189, 180, 85, 43, 11, 202, 208, 12, 156, 36, 122,
     ];
 
-    let result = unsafe { derive_seed(primary_key.try_into().unwrap(), &DEFAULT_NAMESPACE, name)? };
+    let result = unsafe { derive_seed(primary_key, &DEFAULT_NAMESPACE, name)? };
 
     assert_eq!(result, expected);
     Ok(())

@@ -5,7 +5,6 @@
     missing_debug_implementations,
     missing_docs,
     redundant_lifetimes,
-    non_local_definitions,
     //unsafe_code,
     non_local_definitions
 )]

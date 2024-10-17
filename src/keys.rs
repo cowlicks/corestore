@@ -131,11 +131,14 @@ pub fn key_pair_from_name(
 fn check_derive_seed() -> Result<()> {
     // got this from running js's derive seed
     let expected: [u8; 32] = [
-        117, 130, 149, 11, 198, 78, 24, 188, 218, 87, 207, 216, 125, 230, 173, 2, 87, 46, 17, 230,
-        83, 183, 172, 238, 22, 26, 25, 12, 47, 20, 163, 11,
+        20, 199, 106, 232, 158, 115, 83, 70, 13, 9, 129, 194, 50, 190, 160, 158, 46, 252, 91, 200,
+        138, 10, 110, 49, 141, 167, 190, 36, 160, 145, 113, 106,
     ];
     let name = "foo";
-    let primary_key = std::fs::read("data/primary-key").unwrap();
+    let primary_key: [u8; 32] = [
+        45, 168, 29, 102, 53, 33, 238, 58, 210, 74, 33, 141, 133, 20, 97, 2, 65, 13, 85, 203, 174,
+        189, 180, 85, 43, 11, 202, 208, 12, 156, 36, 122,
+    ];
 
     let result = unsafe { derive_seed(primary_key.try_into().unwrap(), &DEFAULT_NAMESPACE, name)? };
 

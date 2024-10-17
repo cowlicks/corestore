@@ -217,11 +217,7 @@ impl Corestore {
         });
         spawn(async move {
             loop {
-                let event_fut = async {
-                    let mut proto = protocol.write().await;
-                    let p = proto._next().await;
-                    p
-                };
+                let event_fut = async { protocol.write().await._next().await };
                 if let Ok(Some(Ok(event))) = timeout(Duration::from_millis(500), event_fut).await {
                     debug!("RX Protocol event: [{event:?}]");
                     match event {

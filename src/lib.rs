@@ -13,6 +13,7 @@
 mod builder;
 mod keys;
 mod storage;
+use delegate::delegate;
 use futures_lite::{AsyncRead, AsyncWrite};
 use hypercore_protocol::{discovery_key, DiscoveryKey, Event, ProtocolBuilder};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -157,6 +158,18 @@ pub struct Corestore {
 }
 
 impl Corestore {
+    delegate! {
+        to self.corestore.read().await {
+            #[await(false)]
+            async fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey>;
+        }
+        to self.corestore.write().await {
+            /// Get a core from it's [`VerifyingKey`].
+            async fn get_from_verifying_key(&self, vk: &VerifyingKey) -> Result<ReplicatingCore>;
+            /// Get a hypercore by name. If the core does not exist, create it.
+            async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore>;
+        }
+    }
     /// Create a new [`Corestore`] that stores it data in RAM
     pub async fn new_mem() -> Corestore {
         CorestoreBuilder::default()
@@ -164,23 +177,6 @@ impl Corestore {
             .build()
             .await
             .expect("should always work")
-    }
-
-    /// Get a hypercore by name. If the core does not exist, create it.
-    pub async fn get_from_name(&self, name: &str) -> Result<ReplicatingCore> {
-        self.corestore.write().await.get_from_name(name).await
-    }
-
-    /// Get a core from it's [`VerifyingKey`].
-    pub async fn get_from_verifying_key(
-        &self,
-        verifying_key: &VerifyingKey,
-    ) -> Result<ReplicatingCore> {
-        self.corestore
-            .write()
-            .await
-            .get_from_verifying_key(verifying_key)
-            .await
     }
 
     /// Start replicating through the given stream
@@ -231,29 +227,15 @@ impl Corestore {
                         Event::Handshake(_m) => {
                             // TODO associate a "name" with this stream and log it.
                             if is_initiator {
-                                // TODO these methods YUK!
-                                let vks: Vec<VerifyingKey> = cs
-                                    .corestore
-                                    .read()
-                                    .await
-                                    .verifying_keys()
-                                    .into_iter()
-                                    .cloned()
-                                    .collect();
                                 // TODO spawn this?
-                                for vk in vks {
+                                for vk in cs.corestore.read().await.verifying_keys() {
                                     protocol.write().await.open(*vk.as_bytes()).await?;
                                 }
                             }
                             debug!("Handshake complete. Session secured")
                         }
                         Event::DiscoveryKey(dk) => {
-                            if let Some(vk) = cs
-                                .corestore
-                                .read()
-                                .await
-                                .verifying_key_from_discovery_key(&dk)
-                            {
+                            if let Some(vk) = cs.verifying_key_from_discovery_key(&dk).await {
                                 protocol.write().await.open(*vk.as_bytes()).await?;
                             }
                         }
@@ -263,22 +245,15 @@ impl Corestore {
                             //
                             // get the core associated with this channel's dk.
                             let Some(vk) = cs
-                                .corestore
-                                .read()
-                                .await
                                 .verifying_key_from_discovery_key(&channel.discovery_key())
+                                .await
                             else {
                                 panic!(
                             "We **should** have verified that we have a core with this &dk already"
                         );
                             };
                             // get core replicating over the channel...
-                            let core = cs
-                                .corestore
-                                .write()
-                                .await
-                                .get_from_verifying_key(&vk)
-                                .await?;
+                            let core = cs.get_from_verifying_key(&vk).await?;
                             // pass channel to peers to replicate
                             let _ = core
                                 .add_peer(

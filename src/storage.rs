@@ -16,8 +16,8 @@ pub(crate) fn get_storage_root<T: Into<StorageId>>(to_id: T) -> PathBuf {
 
     format!(
         "{CORES_DIR_NAME}/{}/{}/{}",
-        id.0[0..2].to_string(),
-        id.0[2..4].to_string(),
+        &id.0[0..2],
+        &id.0[2..4],
         id.0
     )
     .into()
@@ -152,7 +152,7 @@ impl StorageKind {
     pub fn get_or_create_primary_key(&self, pk: &Option<PrimaryKey>) -> Result<PrimaryKey> {
         Ok(match self {
             // Mem: use provided primary key or generate a new one
-            StorageKind::Mem => pk.unwrap_or_else(|| generate_primary_key()),
+            StorageKind::Mem => pk.unwrap_or_else(generate_primary_key),
             StorageKind::Disk(ref path) => {
                 let pk_path = path.join(PRIMARY_KEY_FILE_NAME);
                 // key file exists on disk
@@ -167,8 +167,8 @@ impl StorageKind {
                         .map_err(|_| Error::InvalidPrimaryKey)?
                 } else {
                     // No existing key on disk, create one
-                    let pk = pk.unwrap_or_else(|| generate_primary_key());
-                    write(pk_path, &pk)?;
+                    let pk = pk.unwrap_or_else(generate_primary_key);
+                    write(pk_path, pk)?;
                     pk
                 }
             }

@@ -143,7 +143,7 @@ impl CoreCache {
     fn verifying_key_from_discovery_key(&self, dk: &DiscoveryKey) -> Option<VerifyingKey> {
         for vk in self.verifying_key_to_cores.keys() {
             if dk == &discovery_key(vk.as_bytes()) {
-                return Some(vk.clone());
+                return Some(*vk);
             }
         }
         None
@@ -242,7 +242,7 @@ impl Corestore {
                             //
                             // get the core associated with this channel's dk.
                             let Some(vk) = cs
-                                .verifying_key_from_discovery_key(&channel.discovery_key())
+                                .verifying_key_from_discovery_key(channel.discovery_key())
                                 .await
                             else {
                                 panic!(
@@ -294,7 +294,7 @@ mod test {
         // initialize CS with a fixed primary key
         // check it producets the expected fixed file path
         let storage_dir = tempfile::tempdir().unwrap();
-        let mut pk = TEST_PK.clone();
+        let mut pk = TEST_PK;
         pk[0] = 0;
 
         let cs = CorestoreBuilder::default()
@@ -319,7 +319,7 @@ mod test {
     #[tokio::test]
     async fn primary_key_cstore_dir_gets_used() -> Result<()> {
         let storage_dir = tempfile::tempdir().unwrap();
-        let mut pk = TEST_PK.clone();
+        let mut pk = TEST_PK;
         pk[0] = 1;
 
         {
@@ -362,7 +362,7 @@ mod test {
         let (a, b) = create_connected_streams();
         let name = "foo";
         let core_a = cs_a.get_from_name(name).await?;
-        let pk = core_a.key_pair().await.public.clone();
+        let pk = core_a.key_pair().await.public;
         let core_b = cs_b.get_from_verifying_key(&pk).await?;
 
         core_a.append(b"hello").await?;
@@ -397,7 +397,7 @@ mod test {
         let core_a = cs_a.get_from_name(name).await?;
         dbg!(core_a.append(b"hello").await?);
 
-        let pk = core_a.key_pair().await.public.clone();
+        let pk = core_a.key_pair().await.public;
         let core_b = cs_b.get_from_verifying_key(&pk).await?;
 
         core_a.append(b"world").await?;

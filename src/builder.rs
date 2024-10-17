@@ -89,7 +89,7 @@ impl InnerCorstore {
         };
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
-        let _ = self.events.send(Event::CoreAdded(kp.public.clone()));
+        let _ = self.events.send(Event::CoreAdded(kp.public));
         Ok(core)
     }
 
@@ -99,7 +99,7 @@ impl InnerCorstore {
         &mut self,
         verifying_key: &VerifyingKey,
     ) -> Result<ReplicatingCore> {
-        if let Some(core) = self.core_cache.get(&verifying_key) {
+        if let Some(core) = self.core_cache.get(verifying_key) {
             return Ok(core);
         };
         let kp = PartialKeypair {
@@ -109,7 +109,7 @@ impl InnerCorstore {
         let core = self.storage.get_core_from_key_pair(kp.clone()).await?;
         self.core_cache.insert(&kp.public, core.clone());
         // TODO dry this
-        let _ = self.events.send(Event::CoreAdded(kp.public.clone()));
+        let _ = self.events.send(Event::CoreAdded(kp.public));
         Ok(core)
     }
 }
